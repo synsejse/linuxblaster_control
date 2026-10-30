@@ -2,18 +2,16 @@
 , rustPlatform
 , pkg-config
 , udev
-, alsa-lib
 , dbus
 , wayland
 , libxkbcommon
 , libGL
 , libglvnd
-, fetchFromGitHub
 }:
 
 rustPlatform.buildRustPackage rec {
   pname = "linuxblaster_control";
-  version = "2.4.1";
+  version = "0.1.0";
 
   # only what the build needs, so target/ and other local files stay out of the store
   src = lib.fileset.toSource {
@@ -21,23 +19,15 @@ rustPlatform.buildRustPackage rec {
     fileset = lib.fileset.unions [
       ../Cargo.toml
       ../Cargo.lock
-      ../build.rs
       ../src
       ../examples
+      ../tests
+      ../docs
       ../packaging
       ../README.md
       ../LICENSE
     ];
   };
-
-  autoeq_data = fetchFromGitHub {
-    owner = "jaakkopasanen";
-    repo = "AutoEq";
-    rev = "master";
-    sha256 = "sha256-/kj5ITqtaEWtcZkmB5DEIfj44otXKXYBE7ArV++YLkM=";
-  };
-
-  env.AUTOEQ_REPO_DIR = autoeq_data;
 
   cargoLock = {
     lockFile = ../Cargo.lock;
@@ -49,7 +39,6 @@ rustPlatform.buildRustPackage rec {
 
   buildInputs = [
     udev
-    alsa-lib
     wayland
     libxkbcommon
     libGL
@@ -60,7 +49,6 @@ rustPlatform.buildRustPackage rec {
   # (dbus is loaded at runtime by the file dialog for Load/Save Profile)
   runtimeDependencies = [
     udev
-    alsa-lib
     dbus
     wayland
     libxkbcommon
@@ -68,8 +56,8 @@ rustPlatform.buildRustPackage rec {
     libglvnd
   ];
 
-  # Skip tests that require HOME directory and device access
-  doCheck = false;
+  # Captured protocol tests and headless UI checks need no device or display.
+  doCheck = true;
 
   postInstall = ''
     # Install udev rules
@@ -82,19 +70,20 @@ rustPlatform.buildRustPackage rec {
 
     # README and LICENSE
     install -Dm644 ${../README.md} $out/share/doc/${pname}/README.md
+    cp -r ${../docs} $out/share/doc/${pname}/docs
     install -Dm644 ${../LICENSE} $out/share/licenses/${pname}/LICENSE
   '';
 
   postFixup = ''
     # Add runtime dependencies to the binary
-    patchelf --add-rpath "${lib.makeLibraryPath [ udev alsa-lib dbus wayland libxkbcommon libGL libglvnd ]}" $out/bin/linuxblaster_control
+    patchelf --add-rpath "${lib.makeLibraryPath [ udev dbus wayland libxkbcommon libGL libglvnd ]}" $out/bin/linuxblaster_control
   '';
 
   meta = with lib; {
-    description = "Native Linux GUI application to control the Creative Sound Blaster X G6";
+    description = "Native Linux GUI application to control the Creative Sound Blaster X4";
     longDescription = ''
     '';
-    homepage = "https://github.com/RizeCrime/linuxblaster_control";
+    homepage = "https://github.com/synsejse/linuxblaster_control";
     license = licenses.mit;
     maintainers = [ ];
     mainProgram = "linuxblaster_control";

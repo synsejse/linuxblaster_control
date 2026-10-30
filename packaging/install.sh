@@ -5,7 +5,7 @@
 #   sudo ./install.sh --uninstall  remove everything again
 #
 # Installs to /usr/local, plus the udev rule that lets your user
-# account control the G6 without root.
+# account control the X4 without root.
 
 set -e
 
@@ -21,7 +21,7 @@ fi
 reload_udev() {
     if command -v udevadm >/dev/null 2>&1; then
         udevadm control --reload-rules >/dev/null 2>&1 || true
-        udevadm trigger --subsystem-match=hidraw --action=change >/dev/null 2>&1 || true
+        udevadm trigger --subsystem-match=tty --action=change >/dev/null 2>&1 || true
     fi
 }
 
@@ -33,7 +33,7 @@ if [ "$1" = "--uninstall" ]; then
           "$RULE"
     reload_udev
     echo "Linuxblaster Control was removed."
-    echo "Your saved profiles in ~/.local/share/linuxblaster/ were kept."
+    echo "Your saved profiles in your chosen preset directory were kept."
     exit 0
 fi
 

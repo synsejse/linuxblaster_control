@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
 Name=Linuxblaster Control
-GenericName=Sound BlasterX G6 Control
-Comment=Control the Creative Sound BlasterX G6: SBX effects, equalizer, microphone, mixer and lighting
+GenericName=Sound Blaster X4 Control
+Comment=Control the Creative Sound Blaster X4: output, Direct Mode, headphone gain and hardware equalizer
 Exec=linuxblaster_control
 Icon=linuxblaster-control
 Terminal=false
 Categories=AudioVideo;Audio;Mixer;
-Keywords=sound;audio;equalizer;eq;dac;creative;soundblaster;g6;sbx;microphone;
+Keywords=sound;audio;equalizer;eq;dac;creative;soundblaster;x4;
 StartupWMClass=linuxblaster-control

@@ -1,563 +1,387 @@
-#![allow(unused)]
-
-use hidapi::{DeviceInfo, HidApi, HidDevice};
+//! Sound Blaster X4 controls over CDC ACM; audio remains with snd-usb-audio.
+pub mod protocol;
+use protocol::{Result, Session, invalid};
 use serde::{Deserialize, Serialize};
-use std::env;
-use std::error::Error;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex, OnceLock};
-use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use std::{
+    io::{Read, Write},
+    time::Duration,
+};
+
+pub const VENDOR_ID: u16 = 0x041e;
+pub const PRODUCT_ID: u16 = 0x3278;
+pub const UDEV_RULE: &str =
+    include_str!("../packaging/70-linuxblaster-control.rules");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Output {
+    Speaker,
+    Headphone,
+}
+impl Output {
+    fn value(self) -> u32 {
+        match self {
+            Self::Speaker => 1,
+            Self::Headphone => 4,
+        }
+    }
+    fn genre(self) -> u8 {
+        match self {
+            Self::Speaker => 0,
+            Self::Headphone => 2,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Equalizer {
+    pub enabled: bool,
+    pub preamp_db: f32,
+    pub bands_db: [f32; 10],
+}
+impl Equalizer {
+    pub fn validate(&self) -> Result<()> {
+        for value in
+            std::iter::once(&self.preamp_db).chain(self.bands_db.iter())
+        {
+            if !value.is_finite() || !(-12.0..=12.0).contains(value) {
+                return Err(invalid(
+                    "EQ gains must be finite and within the application's -12..12 dB limit",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct State {
+    pub firmware: String,
+    pub output: Output,
+    pub supported_features: u32,
+    pub reset_features: u32,
+    pub features: u32,
+    pub eq_supported: bool,
+    pub eq: Option<Equalizer>,
+}
+impl State {
+    pub fn feature(&self, bit: u8) -> bool {
+        self.features & (1 << bit) != 0
+    }
+    pub fn writable_feature(&self, bit: u8) -> bool {
+        self.supported_features & (1 << bit) != 0
+            && self.reset_features & (1 << bit) == 0
+    }
+}
+
+/// Local EQ preset, deliberately incompatible with G6 profiles. Never writes stored device profiles.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Preset {
+    pub format: String,
+    pub output: Output,
+    pub eq: Equalizer,
+}
+impl Preset {
+    pub fn new(output: Output, eq: Equalizer) -> Self {
+        Self {
+            format: "soundblaster-x4-eq-v1".into(),
+            output,
+            eq,
+        }
+    }
+    pub fn validate(&self, output: Output) -> Result<()> {
+        if self.format != "soundblaster-x4-eq-v1" {
+            return Err(invalid("This is not an X4 EQ preset"));
+        }
+        if self.output != output {
+            return Err(invalid(
+                "Preset output differs from the active output; switch outputs first",
+            ));
+        }
+        self.eq.validate()
+    }
+}
+
+pub fn open(port: Option<&str>) -> Result<X4<serialport::TTYPort>> {
+    let ports = serialport::available_ports()?;
+    let candidates: Vec<_> = ports.iter().filter(|p| matches!(&p.port_type,
+        serialport::SerialPortType::UsbPort(info) if info.vid == VENDOR_ID && info.pid == PRODUCT_ID)).collect();
+    let path = match port {
+        Some(path) => {
+            let canonical = std::fs::canonicalize(path)?;
+            if !candidates.iter().any(|p| {
+                std::fs::canonicalize(&p.port_name).ok().as_ref()
+                    == Some(&canonical)
+            }) {
+                return Err(invalid(
+                    "Selected port is not a Sound Blaster X4 (041e:3278)",
+                ));
+            }
+            path.to_owned()
+        }
+        None if candidates.len() == 1 => candidates[0].port_name.clone(),
+        None => {
+            return Err(invalid(format!(
+                "Expected one X4, found {}; use --port for multiple devices",
+                candidates.len()
+            )));
+        }
+    };
+    let mut serial = serialport::new(&path, 115200).timeout(Duration::from_millis(20))
+        .flow_control(serialport::FlowControl::None).open_native()
+        .map_err(|e| invalid(format!("Cannot open {path}: {e}. Install the X4 udev rule and replug; close other controllers.")))?;
+    serial.set_exclusive(true)?;
+    use serialport::SerialPort;
+    serial.write_data_terminal_ready(true)?;
+    serial.write_request_to_send(true)?;
+    X4::connect(serial)
+}
+
+pub struct X4<T> {
+    pub session: Session<T>,
+    pub firmware: String,
+}
+impl<T: Read + Write> X4<T> {
+    pub fn connect(port: T) -> Result<Self> {
+        let mut session = Session::new(port);
+        let firmware = session.connect()?;
+        Ok(Self { session, firmware })
+    }
+    fn selector(&mut self, command: u8, payload: &[u8]) -> Result<Vec<u8>> {
+        self.session
+            .get(command, payload, |f| f.payload.first() == payload.first())
+    }
+    pub fn output(&mut self) -> Result<Output> {
+        let p = self.selector(0x2c, &[1])?;
+        if p.len() != 5 {
+            return Err(invalid("Invalid output reply"));
+        }
+        match u32::from_le_bytes(p[1..5].try_into()?) {
+            1 => Ok(Output::Speaker),
+            4 => Ok(Output::Headphone),
+            _ => Err(invalid("Unknown output")),
+        }
+    }
+    pub fn feature_support(&mut self) -> Result<(u32, u32)> {
+        let p = self.selector(0x39, &[2])?;
+        if p.len() != 9 {
+            return Err(invalid("Invalid feature support"));
+        }
+        Ok((
+            u32::from_le_bytes(p[1..5].try_into()?),
+            u32::from_le_bytes(p[5..9].try_into()?),
+        ))
+    }
+    pub fn features(&mut self) -> Result<u32> {
+        let p = self.selector(0x39, &[1, 255, 255, 255, 255])?;
+        if p.len() != 5 {
+            return Err(invalid("Invalid feature state"));
+        }
+        Ok(u32::from_le_bytes(p[1..].try_into()?))
+    }
+    pub fn eq_supported(&mut self) -> Result<bool> {
+        let p = self.session.get(0x10, &[], |_| true)?;
+        if p.len() != 8 {
+            return Err(invalid("Invalid DSP capability response"));
+        }
+        Ok(p[0] & 0x40 != 0)
+    }
+    pub fn eq_parameter(&mut self, parameter: u8) -> Result<f32> {
+        if !(9..=20).contains(&parameter) {
+            return Err(invalid("Invalid EQ parameter"));
+        }
+        let p = self.session.get(0x11, &[1, 0x96, parameter], |f| {
+            f.payload.len() >= 4 && f.payload[2..4] == [0x96, parameter]
+        })?;
+        if p.len() != 8 || p[..2] != [1, 0] {
+            return Err(invalid("Invalid EQ response"));
+        }
+        let value = f32::from_le_bytes(p[4..].try_into()?);
+        if !value.is_finite() {
+            return Err(invalid("Nonfinite EQ response"));
+        }
+        Ok(value)
+    }
+    pub fn eq(&mut self) -> Result<Equalizer> {
+        let enabled = self.eq_parameter(9)?;
+        if enabled != 0.0 && enabled != 1.0 {
+            return Err(invalid("Invalid EQ enable state"));
+        }
+        let preamp_db = self.eq_parameter(10)?;
+        let mut bands_db = [0.0; 10];
+        for (i, band) in bands_db.iter_mut().enumerate() {
+            *band = self.eq_parameter(11 + i as u8)?;
+        }
+        Ok(Equalizer {
+            enabled: enabled == 1.0,
+            preamp_db,
+            bands_db,
+        })
+    }
+    pub fn state(&mut self) -> Result<State> {
+        // Check route before and after: do not present EQ from a different output.
+        let output = self.output()?;
+        let (supported_features, reset_features) = self.feature_support()?;
+        let features = self.features()?;
+        let eq_supported = self.eq_supported()?;
+        let eq = if eq_supported { Some(self.eq()?) } else { None };
+        if self.output()? != output {
+            return Err(invalid(
+                "Output changed during refresh; refresh again",
+            ));
+        }
+        self.session.notifications.clear();
+        Ok(State {
+            firmware: self.firmware.clone(),
+            output,
+            supported_features,
+            reset_features,
+            features,
+            eq_supported,
+            eq,
+        })
+    }
+    pub fn set_output(&mut self, output: Output) -> Result<()> {
+        let support = self.selector(0x2c, &[2])?;
+        if support.len() < 2
+            || support[1] & 0x80 == 0
+            || support.len() != 2 + (support[1] & 0x7f) as usize * 4
+        {
+            return Err(invalid("Invalid output capability response"));
+        }
+        if !support[2..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|v| *v == output.value().to_le_bytes())
+        {
+            return Err(invalid("Output not supported"));
+        }
+        let mut payload = vec![0];
+        payload.extend(output.value().to_le_bytes());
+        self.session.set(0x2c, &payload)?;
+        if self.output()? != output {
+            self.session.usable = false;
+            return Err(invalid("Output readback mismatch"));
+        }
+        Ok(())
+    }
+    pub fn set_feature(&mut self, bit: u8, enabled: bool) -> Result<()> {
+        if ![5, 6].contains(&bit) {
+            return Err(invalid(
+                "Only Direct Mode and headphone gain may be changed",
+            ));
+        }
+        let (supported, reset) = self.feature_support()?;
+        if supported & (1 << bit) == 0 || reset & (1 << bit) != 0 {
+            return Err(invalid("Feature unavailable or requires reset"));
+        }
+        self.session.set(0x39, &[0, bit, u8::from(enabled)])?;
+        if (self.features()? & (1 << bit) != 0) != enabled {
+            self.session.usable = false;
+            return Err(invalid("Feature readback mismatch"));
+        }
+        Ok(())
+    }
+    fn set_eq_parameter(&mut self, parameter: u8, value: f32) -> Result<()> {
+        let mut payload = vec![1, 0x96, parameter];
+        payload.extend(value.to_le_bytes());
+        self.session.set(0x12, &payload)?;
+        if (self.eq_parameter(parameter)? - value).abs() > 0.011 {
+            self.session.usable = false;
+            return Err(invalid("EQ readback mismatch"));
+        }
+        Ok(())
+    }
+    pub fn apply_eq(&mut self, output: Output, eq: &Equalizer) -> Result<()> {
+        eq.validate()?; // Validate every value before the first device access/write.
+        if !self.eq_supported()? {
+            return Err(invalid("Hardware EQ not advertised"));
+        }
+        if self.output()? != output {
+            return Err(invalid("Output changed; refresh before applying EQ"));
+        }
+        let current = self.eq()?;
+        let desired = std::iter::once(eq.preamp_db).chain(eq.bands_db);
+        let previous =
+            std::iter::once(current.preamp_db).chain(current.bands_db);
+        for (i, (value, old)) in desired.zip(previous).enumerate() {
+            if (value - old).abs() > 0.001 {
+                if self.output()? != output {
+                    return Err(invalid(
+                        "Output changed during EQ apply; some settings may have changed",
+                    ));
+                }
+                self.set_eq_parameter(10 + i as u8, value)?;
+            }
+        }
+        if eq.enabled != current.enabled {
+            if self.output()? != output {
+                return Err(invalid("Output changed before EQ enable"));
+            }
+            self.set_eq_parameter(9, if eq.enabled { 1.0 } else { 0.0 })?;
+        }
+        Ok(())
+    }
+    pub fn stored_profile(&mut self, output: Output) -> Result<Equalizer> {
+        let prefix = [1, 2, 0, output.genre()];
+        let mut p = self
+            .session
+            .get(0x17, &prefix, |f| f.payload.starts_with(&prefix))?;
+        let mut data = Vec::new();
+        let mut total = None;
+        let mut complete = false;
+        for block in 0..128 {
+            if p.len() < 7 || p[..4] != prefix {
+                return Err(invalid("Invalid profile header"));
+            }
+            let size = u16::from_le_bytes([p[4], p[5]]) as usize;
+            if *total.get_or_insert(size) != size || p[6] & 0x7f != block {
+                return Err(invalid("Profile block order/size mismatch"));
+            }
+            data.extend_from_slice(&p[7..]);
+            if data.len() > size {
+                return Err(invalid("Oversized profile"));
+            }
+            if p[6] & 0x80 == 0 {
+                complete = true;
+                break;
+            }
+            p = self.session.next_profile_block(&prefix)?;
+        }
+        if !complete || Some(data.len()) != total || data.len() < 4 {
+            return Err(invalid("Incomplete profile"));
+        }
+        let count = u32::from_le_bytes(data[..4].try_into()?) as usize;
+        if count != 12 || data.len() != 4 + count * 6 {
+            return Err(invalid("Unsupported profile layout"));
+        }
+        let mut values = [None; 12];
+        for tuple in data[4..].as_chunks::<6>().0 {
+            if tuple[0] != 0x96 || !(9..=20).contains(&tuple[1]) {
+                return Err(invalid("Unexpected profile parameter"));
+            }
+            let slot = &mut values[(tuple[1] - 9) as usize];
+            if slot.is_some() {
+                return Err(invalid("Duplicate profile parameter"));
+            }
+            let value = f32::from_le_bytes(tuple[2..].try_into()?);
+            if !value.is_finite() {
+                return Err(invalid("Nonfinite profile value"));
+            }
+            *slot = Some(value);
+        }
+        let values = values.map(|v| v.expect("12 unique parameters checked"));
+        if values[0] != 0.0 && values[0] != 1.0 {
+            return Err(invalid("Invalid profile enable value"));
+        }
+        Ok(Equalizer {
+            enabled: values[0] == 1.0,
+            preamp_db: values[1],
+            bands_db: values[2..].try_into()?,
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests;
-
-pub mod features;
-pub mod mixer;
-pub use features::{Feature, FeatureId, MIC_EQ_PRESETS, ValueKind};
-
-pub const VENDOR_ID: u16 = 0x041e;
-pub const PRODUCT_ID: u16 = 0x3256;
-pub const INTERFACE: i32 = 4;
-
-/// Default base directory path
-/// On Windows: %LOCALAPPDATA%/linuxblaster/
-/// On Unix: $XDG_DATA_HOME/linuxblaster/ or $HOME/.local/share/linuxblaster/
-pub static DEFAULT_BASE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    #[cfg(windows)]
-    {
-        let appdata = env::var("LOCALAPPDATA")
-            .expect("LOCALAPPDATA environment variable is not set");
-        PathBuf::from(format!("{}/linuxblaster/", appdata))
-    }
-
-    #[cfg(not(windows))]
-    {
-        PathBuf::from(format!(
-            "{}linuxblaster/",
-            env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!(
-                "{}/.local/share/",
-                env::var("HOME").expect("HOME is not set")
-            )),
-        ))
-    }
-});
-
-pub static DEVICE_CONNECTION: OnceLock<Mutex<HidDevice>> = OnceLock::new();
-
-/// Holds the path of the profile that was loaded or saved last,
-/// so it can be applied on startup (`--apply-last`).
-pub static LAST_PROFILE_FILE: LazyLock<PathBuf> =
-    LazyLock::new(|| DEFAULT_BASE_PATH.join("last_profile"));
-
-/// The profile that was loaded or saved last, if any.
-pub fn last_profile() -> Option<PathBuf> {
-    let path = std::fs::read_to_string(&*LAST_PROFILE_FILE).ok()?;
-    let path = path.trim();
-    (!path.is_empty()).then(|| PathBuf::from(path))
-}
-
-/// Remembers `path` as the last used profile (see `last_profile()`).
-/// Only logs on failure: this is a convenience, not worth an error dialog.
-pub fn remember_last_profile(path: &Path) {
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-    let result = std::fs::create_dir_all(&*DEFAULT_BASE_PATH).and_then(|_| {
-        std::fs::write(&*LAST_PROFILE_FILE, path.to_string_lossy().as_bytes())
-    });
-    if let Err(error) = result {
-        warn!(
-            "Failed to remember the last profile in {:?}: {}",
-            *LAST_PROFILE_FILE, error
-        );
-    }
-}
-
-/// The udev rule that grants the logged-in user access to the G6.
-/// Shipped in the packages, and installed by the app on request.
-pub const UDEV_RULE: &str = include_str!("../packaging/70-linuxblaster-control.rules");
-pub const UDEV_RULE_PATH: &str = "/etc/udev/rules.d/70-linuxblaster-control.rules";
-
-/// Why the app couldn't connect to the device.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConnectError {
-    /// No G6 is plugged in (or it's switched off).
-    NotFound,
-    /// The G6 is there, but this user may not open its HID interface.
-    /// This is what happens without the udev rule.
-    PermissionDenied { path: String },
-    /// Anything else, with a message for the logs/UI.
-    Other(String),
-}
-
-impl std::fmt::Display for ConnectError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound => write!(f, "Sound BlasterX G6 not found"),
-            Self::PermissionDenied { path } => {
-                write!(f, "No permission to access {}", path)
-            }
-            Self::Other(message) => write!(f, "{}", message),
-        }
-    }
-}
-
-impl Error for ConnectError {}
-
-#[derive(Serialize, Deserialize)]
-pub struct BlasterXG6 {
-    pub features: Vec<Feature>,
-}
-
-impl BlasterXG6 {
-    /// Connects to the device and reads its state.
-    /// Panics if that's not possible; see `try_init()`.
-    pub fn init() -> Self {
-        Self::try_init().unwrap_or_else(|error| panic!("{}", error))
-    }
-
-    /// Connects to the device and reads its state.
-    /// Can be called again after an error (e.g. once the G6 is plugged in).
-    pub fn try_init() -> Result<Self, ConnectError> {
-        if DEVICE_CONNECTION.get().is_none() {
-            let connection = Self::open_device()?;
-            // only fails if another thread was faster, which is fine too
-            let _ = DEVICE_CONNECTION.set(Mutex::new(connection));
-        }
-
-        // The G6's HID endpoint can be slow to answer right after a cold
-        // boot or a re-enumeration. Wait briefly and retry, reopening the
-        // hidraw node in case the device re-enumerated in the meantime.
-        //
-        // Never reset the USB device here. A USBDEVFS_RESET wakes the HID
-        // endpoint, but it also leaves the audio interface unusable until
-        // the next re-enumeration, which breaks playback for the whole
-        // session. The reset belongs to the boot path, not to a running
-        // audio session: packaging/coldboot/ ships an optional
-        // udev-triggered helper that resets the G6 once, before PipeWire
-        // opens it. This launcher only waits and retries, so a device that
-        // is merely slow still connects on the first try, and one that is
-        // wedged falls through to the launcher's reconnect screen.
-        if !Self::wait_for_ping() {
-            return Err(ConnectError::Other(
-                "The G6's control interface is not answering yet.".to_owned(),
-            ));
-        }
-
-        let blaster = Self {
-            features: features::all_features(),
-        };
-        blaster.read_state_from_device();
-        Ok(blaster)
-    }
-
-    /// Waits for the HID endpoint to answer, reopening the device between
-    /// attempts. Returns `false` if it stays silent.
-    ///
-    /// Reopening is required because a re-enumeration invalidates the old
-    /// hidraw file descriptor, and the kernel does not retarget it.
-    fn wait_for_ping() -> bool {
-        const ATTEMPTS: usize = 3;
-        const INTERVAL: Duration = Duration::from_millis(300);
-
-        for attempt in 0..ATTEMPTS {
-            if features::ping_quiet() {
-                return true;
-            }
-            if attempt + 1 == ATTEMPTS {
-                break;
-            }
-            std::thread::sleep(INTERVAL);
-            if let Ok(connection) = Self::open_device() {
-                *DEVICE_CONNECTION.get().unwrap().lock().unwrap() =
-                    connection;
-            }
-        }
-        false
-    }
-
-    fn open_device() -> Result<HidDevice, ConnectError> {
-        let api = HidApi::new().map_err(|error| {
-            ConnectError::Other(format!("Failed to initialize HID: {}", error))
-        })?;
-        let device =
-            Self::find_device(&api).map_err(|_| ConnectError::NotFound)?;
-
-        // hidapi only reports a generic error, so check the permissions
-        // on the hidraw node directly to tell the user what's wrong
-        let path = device.path().to_string_lossy().into_owned();
-        if let Err(error) =
-            std::fs::OpenOptions::new().read(true).write(true).open(&path)
-        {
-            if error.kind() == ErrorKind::PermissionDenied {
-                return Err(ConnectError::PermissionDenied { path });
-            }
-        }
-
-        let connection = device.open_device(&api).map_err(|error| {
-            ConnectError::Other(format!("Failed to open {}: {}", path, error))
-        })?;
-
-        if connection.set_blocking_mode(false).is_err() {
-            warn!("Failed to set blocking mode to false");
-            warn!("Continuing with blocking mode in unknown state...");
-        }
-
-        Ok(connection)
-    }
-
-    /// Queries every feature from hardware individually.
-    /// This will update the internal state of the features with the current hardware values.
-    pub fn read_state_from_device(&self) {
-        for feature in &self.features {
-            feature.read_from_device();
-        }
-        // whatever got pushed in between is already covered by the reads
-        features::UNSOLICITED.lock().unwrap().clear();
-    }
-
-    /// Re-reads only the ALSA mixer features.
-    /// They can change outside of this app (volume knob, pavucontrol, ...).
-    pub fn read_mixer_state(&self) {
-        // don't log an error per control every second if the card is missing
-        if !mixer::is_available() {
-            debug!("ALSA card not available, skipping mixer refresh");
-            return;
-        }
-        for feature in &self.features {
-            if feature.id.alsa_element().is_some() {
-                feature.read_from_device();
-            }
-        }
-    }
-
-    /// Applies state the device pushed on its own
-    /// (after writes, and when the hardware buttons are used)
-    /// to the feature cache, without any extra queries.
-    ///
-    /// Returns `true` if anything was processed.
-    pub fn process_device_events(&self) -> bool {
-        while let Some(packet) = features::read_packet(0) {
-            features::UNSOLICITED.lock().unwrap().push(packet);
-        }
-        let packets = std::mem::take(&mut *features::UNSOLICITED.lock().unwrap());
-
-        let mut output_changed = false;
-        for packet in &packets {
-            if packet[0] != 0x5a {
-                continue;
-            }
-            match packet[1] {
-                // StatusResponse, possibly with multiple features
-                0x11 => {
-                    for (family, feature_id, raw) in
-                        features::status_entries(packet)
-                    {
-                        let Some(id) =
-                            FeatureId::from_dsp_address(family, feature_id)
-                        else {
-                            continue;
-                        };
-                        debug!("Device pushed {} (raw: {})", id, raw);
-                        self.feature(id).set_cached(id.decode(raw));
-                    }
-                }
-                // GlobalProfile bitmask
-                0x26 if packet[3] == 0x08 => {
-                    let bitmask = packet[6];
-                    debug!("Device pushed global bitmask 0x{:02x}", bitmask);
-                    self.feature(FeatureId::SbxMaster).set_cached(
-                        if bitmask & 0x01 != 0 { 1.0 } else { 0.0 },
-                    );
-                    self.feature(FeatureId::ScoutMode).set_cached(
-                        if bitmask & 0x02 != 0 { 1.0 } else { 0.0 },
-                    );
-                }
-                // OutputSelect read response
-                0x2c if packet[3] == 0x01 => {
-                    let output = features::output_decode(packet[4]);
-                    if output != self.feature(FeatureId::Output).value() {
-                        output_changed = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // the device keeps separate settings per output
-        if output_changed {
-            info!("Output changed on the device, re-reading state");
-            self.read_state_from_device();
-        }
-
-        !packets.is_empty()
-    }
-
-    /// Lookup a feature by ID.
-    pub fn feature(&self, id: FeatureId) -> &Feature {
-        self.features
-            .iter()
-            .find(|feature| feature.id == id)
-            .unwrap_or_else(|| panic!("Feature {:?} not registered", id))
-    }
-
-    /// Managed Write:
-    /// enable dependencies, write, confirm, re-query dependents.
-    ///
-    /// Automatically calls `read_state_from_device()` after switching the Output.
-    ///
-    /// Pass `None` for value to toggle (flip between 0.0 and 1.0).
-    pub fn set_feature(
-        &self,
-        id: FeatureId,
-        value: Option<f32>,
-    ) -> Result<(), Box<dyn Error>> {
-        let feature = self.feature(id);
-
-        let actual_value = match value {
-            Some(value) => value,
-            None => {
-                if feature.as_bool() {
-                    0.0
-                } else {
-                    1.0
-                }
-            }
-        };
-
-        debug!("set_feature: {} = {}", id, actual_value);
-
-        for &dependency_id in id.dependencies() {
-            let dependency = self.feature(dependency_id);
-            if dependency.value() != 1.0 {
-                debug!("Enabling dependency: {} for {}", dependency_id, id);
-                self.set_feature(dependency_id, Some(1.0))?;
-            }
-        }
-
-        feature.write_to_device(actual_value);
-        feature.read_from_device();
-
-        for &dependent_id in id.dependents() {
-            self.feature(dependent_id).read_from_device();
-        }
-
-        // changing the output changes the internal settings profile
-        if feature.id == FeatureId::Output {
-            self.read_state_from_device();
-        }
-
-        self.process_device_events();
-
-        Ok(())
-    }
-
-    pub fn find_device(api: &HidApi) -> Result<DeviceInfo, Box<dyn Error>> {
-        let device = api
-            .device_list()
-            .find(|device| {
-                debug!("Checking device: {:04x?}", device);
-                device.vendor_id() == VENDOR_ID
-                    && device.product_id() == PRODUCT_ID
-                    && device.interface_number() == INTERFACE
-            })
-            .ok_or_else(|| {
-                Box::new(std::io::Error::new(
-                    ErrorKind::NotFound,
-                    "Device not found",
-                ))
-            })
-            .cloned()?;
-        Ok(device)
-    }
-
-    /// Checks whether the device answers a ping.
-    pub fn is_connected(&self) -> bool {
-        features::ping()
-    }
-
-    /// ### Important
-    /// This does **not** reset the USB Connection!
-    ///
-    /// This is a managed reset function that takes device quirks into account.
-    /// It resets "all" features to their default values, where "all"
-    /// means a hard-coded list of features that this software touches.
-    ///
-    /// Does not reset the Output, Lighting, or the hardware Mixer
-    /// (see `FeatureId::reset_value()`).
-    ///
-    /// If this software doesn't modify a feature, it won't be included in the reset.
-    /// I don't know where this would become relevant,
-    /// but I figured it'd be worth noting down.
-    pub fn reset(&self) -> Result<(), Box<dyn Error>> {
-        // yeah the return type might be stupid, I'll fix it soon™️
-        let values = self
-            .features
-            .iter()
-            .filter_map(|feature| {
-                feature.id.reset_value().map(|value| (feature.id, value))
-            })
-            .collect();
-
-        self.write_in_order(values);
-        self.read_state_from_device();
-
-        Ok(())
-    }
-
-    /// Writes raw values without the dependency handling of `set_feature()`,
-    /// in an order that avoids device side effects:
-    /// 1. values (levels, EQ bands, modes, ...)
-    /// 2. toggles, which also switch SBX on/off on the device by themselves
-    /// 3. Scout Mode
-    ///
-    /// SBX Master itself is never written here: it reflects whether any
-    /// playback effect is on, and turning it on with no effect active
-    /// makes the device enable Surround on its own.
-    fn write_in_order(&self, values: Vec<(FeatureId, f32)>) {
-        let is_global = |id: FeatureId| {
-            matches!(id, FeatureId::SbxMaster | FeatureId::ScoutMode)
-        };
-        let is_toggle =
-            |id: FeatureId| matches!(id.value_kind(), ValueKind::Toggle);
-
-        let values_first = values
-            .iter()
-            .filter(|(id, _)| !is_toggle(*id) && !is_global(*id));
-        let toggles_second = values
-            .iter()
-            .filter(|(id, _)| is_toggle(*id) && !is_global(*id));
-        let scout_last = values
-            .iter()
-            .filter(|(id, _)| *id == FeatureId::ScoutMode);
-
-        for &(id, value) in values_first.chain(toggles_second).chain(scout_last)
-        {
-            self.feature(id).write_to_device(value);
-        }
-
-        features::UNSOLICITED.lock().unwrap().clear();
-    }
-
-    pub fn save_profile(&self, path: PathBuf) -> Result<(), Box<dyn Error>> {
-        // save the current state of the features to a profile
-
-        let profile = BlasterXG6 {
-            features: self
-                .features
-                .iter()
-                .filter(|feature| feature.id.in_profile())
-                .cloned()
-                .collect(),
-        };
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let json = serde_json::to_string_pretty(&profile)?;
-        std::fs::write(&path, json)?;
-        info!("Saved Profile to {:?}", path);
-
-        Ok(())
-    }
-
-    /// Reads the values a profile applies: every feature stored in profiles,
-    /// except the ones that couldn't be read when it was saved.
-    fn read_profile(
-        path: &Path,
-    ) -> Result<Vec<(FeatureId, f32)>, Box<dyn Error>> {
-        let json = std::fs::read_to_string(path)?;
-        let saved: BlasterXG6 = serde_json::from_str(&json)?;
-
-        Ok(saved
-            .features
-            .iter()
-            .filter(|feature| feature.id.in_profile())
-            // NaN = the value couldn't be read when the profile was saved
-            .filter(|feature| !feature.value().is_nan())
-            .map(|feature| (feature.id, feature.value()))
-            .collect())
-    }
-
-    /// Applies a profile to the currently active output.
-    ///
-    /// Every saved value is written, including toggles that are OFF,
-    /// and sliders are written as-is without switching their toggle on.
-    pub fn apply_profile(&self, path: PathBuf) -> Result<(), Box<dyn Error>> {
-        let values = Self::read_profile(&path)?;
-
-        self.write_in_order(values);
-        self.read_state_from_device();
-
-        info!("Applied Profile ({:?})", path);
-
-        Ok(())
-    }
-
-    /// Applies a profile like `apply_profile()`, but only writes the values
-    /// that differ from the state read from the device.
-    /// Used on startup, where usually little or nothing has changed,
-    /// so the device isn't flooded with writes it doesn't need.
-    ///
-    /// Returns how many features were written.
-    pub fn sync_profile(&self, path: &Path) -> Result<usize, Box<dyn Error>> {
-        let saved = Self::read_profile(path)?;
-        let changes = profile_changes(&self.features, &saved);
-
-        if changes.is_empty() {
-            info!("Device already matches the profile ({:?})", path);
-            return Ok(0);
-        }
-
-        let count = changes.len();
-        debug!("Profile changes: {:?}", changes);
-        self.write_in_order(changes);
-        self.read_state_from_device();
-
-        let mismatched: Vec<FeatureId> = saved
-            .iter()
-            .filter(|&&(id, value)| self.feature(id).value() != value)
-            .map(|&(id, _)| id)
-            .collect();
-        if !mismatched.is_empty() {
-            warn!("Device doesn't match the profile for: {:?}", mismatched);
-        }
-
-        info!("Applied {} setting(s) from the profile ({:?})", count, path);
-
-        Ok(count)
-    }
-}
-
-/// The saved values that differ from the cached `current` state
-/// (a value that couldn't be read counts as different).
-///
-/// The saved toggles of the changed values' `dependencies()` are included too,
-/// even if they match: `set_feature()` switches them on before such a write,
-/// so writing them again (after the value, see `write_in_order()`)
-/// makes sure they end up as saved. Everything returned is a subset of what
-/// `apply_profile()` writes, so it keeps the same write order and side effects.
-pub(crate) fn profile_changes(
-    current: &[Feature],
-    saved: &[(FeatureId, f32)],
-) -> Vec<(FeatureId, f32)> {
-    let cached = |id: FeatureId| {
-        current
-            .iter()
-            .find(|feature| feature.id == id)
-            .map_or(f32::NAN, Feature::value)
-    };
-    let differs = |&(id, value): &(FeatureId, f32)| cached(id) != value;
-
-    saved
-        .iter()
-        .filter(|&&(id, value)| {
-            differs(&(id, value))
-                || saved.iter().any(|entry| {
-                    differs(entry) && entry.0.dependencies().contains(&id)
-                })
-        })
-        .copied()
-        .collect()
-}

@@ -1,296 +1,335 @@
-#[cfg(test)]
-mod tests {
-    use crate::features::{self, FeatureId, MIC_EQ_PRESETS, ValueKind};
+use super::*;
+use crate::protocol::{Frame, Parser, Session, unlock};
+use std::{
+    collections::{HashMap, VecDeque},
+    io,
+    sync::{Arc, Mutex},
+};
 
-    /// Builds a 64-byte packet from a hex string like "5a 11 08 ...".
-    fn packet(hex: &str) -> [u8; 64] {
-        let mut packet = [0u8; 64];
-        for (index, byte) in hex.split_whitespace().enumerate() {
-            packet[index] = u8::from_str_radix(byte, 16).unwrap();
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+fn wire(command: u8, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![0x5a, command, payload.len() as u8];
+    bytes.extend(payload);
+    bytes
+}
+#[derive(Default)]
+struct Fake {
+    responses: HashMap<Vec<u8>, Vec<u8>>,
+    rx: VecDeque<u8>,
+    writes: Arc<Mutex<Vec<Vec<u8>>>>,
+    cold: bool,
+}
+impl Read for Fake {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.rx.is_empty() {
+            return Err(io::ErrorKind::TimedOut.into());
         }
-        packet
-    }
-
-    #[test]
-    fn all_feature_ids_are_registered() {
-        let features = features::all_features();
-        for &id in FeatureId::ALL {
-            assert!(
-                features.iter().any(|feature| feature.id == id),
-                "FeatureId::{:?} is in ALL but not in all_features()",
-                id
-            );
+        let n = buffer.len().min(2).min(self.rx.len());
+        for byte in &mut buffer[..n] {
+            *byte = self.rx.pop_front().unwrap();
         }
+        Ok(n)
     }
-
-    #[test]
-    fn no_duplicate_features() {
-        let features = features::all_features();
-        for (index, feature) in features.iter().enumerate() {
-            for other in features.iter().skip(index + 1) {
-                assert_ne!(
-                    feature.id, other.id,
-                    "Duplicate feature registration: {:?}",
-                    feature.id
-                );
-            }
+}
+impl Write for Fake {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.writes.lock().unwrap().push(bytes.to_vec());
+        if self.cold && bytes.starts_with(b"unlock") {
+            self.rx.extend(b"unlock_OK\r\n");
         }
-    }
-
-    #[test]
-    fn dependencies_reference_valid_feature_ids() {
-        for &id in FeatureId::ALL {
-            for &dependency in id.dependencies() {
-                assert!(
-                    FeatureId::ALL.contains(&dependency),
-                    "{:?} depends on {:?} which is not in ALL",
-                    id,
-                    dependency
-                );
-            }
+        if self.cold && bytes == b"SW_MODE1\r\n" {
+            self.responses.insert(hex("5a0300"), hex("5a03023b00"));
         }
-    }
-
-    #[test]
-    fn dependents_reference_valid_feature_ids() {
-        for &id in FeatureId::ALL {
-            for &dependent in id.dependents() {
-                assert!(
-                    FeatureId::ALL.contains(&dependent),
-                    "{:?} has dependent {:?} which is not in ALL",
-                    id,
-                    dependent
-                );
-            }
+        if let Some(response) = self.responses.get(bytes) {
+            self.rx.extend(response);
         }
+        Ok(bytes.len())
     }
-
-    #[test]
-    fn dependencies_and_dependents_are_consistent() {
-        for &id in FeatureId::ALL {
-            for &dependency in id.dependencies() {
-                assert!(
-                    dependency.dependents().contains(&id),
-                    "{:?} lists {:?} as a dependency, but {:?} does not list {:?} as a dependent",
-                    id,
-                    dependency,
-                    dependency,
-                    id
-                );
-            }
-        }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
-
-    #[test]
-    fn no_feature_depends_on_itself() {
-        for &id in FeatureId::ALL {
-            assert!(
-                !id.dependencies().contains(&id),
-                "{:?} depends on itself",
-                id
-            );
-            assert!(
-                !id.dependents().contains(&id),
-                "{:?} lists itself as a dependent",
-                id
-            );
-        }
+}
+fn fake(responses: Vec<(Vec<u8>, Vec<u8>)>) -> Fake {
+    Fake {
+        responses: responses.into_iter().collect(),
+        ..Default::default()
     }
-
-    #[test]
-    fn paired_sliders_are_valid_feature_ids() {
-        for &id in FeatureId::ALL {
-            let Some(slider_id) = id.paired_slider() else { continue };
-            assert!(
-                FeatureId::ALL.contains(&slider_id),
-                "{:?} has paired slider {:?} which is not in ALL",
-                id,
-                slider_id
-            );
-        }
+}
+fn device(port: Fake) -> X4<Fake> {
+    X4 {
+        session: Session::new(port),
+        firmware: "fixture".into(),
     }
+}
+fn ack(command: u8, status: u8) -> Vec<u8> {
+    wire(2, &[command, status, 0, 0, 0, 0, 0, 0, 0, 0])
+}
 
-    #[test]
-    fn dsp_features_have_dsp_addresses() {
-        let features = features::all_features();
-        for feature in &features {
-            if feature.id.dsp_address().is_some() {
-                continue;
-            }
-            assert!(
-                matches!(
-                    feature.id,
-                    FeatureId::SbxMaster
-                        | FeatureId::ScoutMode
-                        | FeatureId::Output
-                        | FeatureId::DacFilter
-                        | FeatureId::MicBoost
-                        | FeatureId::LightingToggle
-                        | FeatureId::LightingColor
-                ) || feature.id.alsa_element().is_some(),
-                "{:?} has no DSP address and is not a known non-DSP feature",
-                feature.id
-            );
-        }
+#[test]
+fn every_fragment_boundary_and_coalesced_frames() {
+    let bytes =
+        hex("5a03023b005b020a006d0000000000000000005a11080100960a000010c1");
+    let expected = vec![
+        Frame {
+            command: 3,
+            payload: hex("3b00"),
+        },
+        Frame {
+            command: 2,
+            payload: hex("6d000000000000000000"),
+        },
+        Frame {
+            command: 0x11,
+            payload: hex("0100960a000010c1"),
+        },
+    ];
+    for cut in 0..=bytes.len() {
+        let mut parser = Parser::default();
+        let mut frames = parser.feed(&bytes[..cut]).unwrap();
+        frames.extend(parser.feed(&bytes[cut..]).unwrap());
+        assert_eq!(frames, expected);
     }
-
-    #[test]
-    fn eq_bands_constant_has_ten_entries() {
-        assert_eq!(FeatureId::EQ_BANDS.len(), 10);
+    assert!(Parser::default().feed(&hex("5b02ffff")).is_err());
+    assert!(Parser::default().feed(&hex("5b020a")).unwrap().is_empty());
+}
+#[test]
+fn real_unlock_vector() {
+    let rows: serde_json::Value = serde_json::from_str(
+        include_str!("../tests/fixtures/unlock.json")
+            .trim_start_matches('\u{feff}'),
+    )
+    .unwrap();
+    let rows = rows.as_array().unwrap();
+    let challenge = hex(rows
+        .iter()
+        .find(|r| {
+            r["direction"] == "rx"
+                && r["hex"].as_str().unwrap().starts_with("77686f617265796f75")
+        })
+        .unwrap()["hex"]
+        .as_str()
+        .unwrap());
+    let sent = hex(rows
+        .iter()
+        .find(|r| {
+            r["direction"] == "tx"
+                && r["hex"].as_str().unwrap().starts_with("756e6c6f636b")
+        })
+        .unwrap()["hex"]
+        .as_str()
+        .unwrap());
+    assert_eq!(
+        unlock(&challenge[9..45], sent[6..22].try_into().unwrap()).unwrap(),
+        sent
+    );
+}
+#[test]
+fn cold_session_handles_binary_challenge_with_embedded_crlf() {
+    let mut challenge = b"whoareyou".to_vec();
+    challenge.extend(hex("1e047832"));
+    challenge.extend(b"\r\n");
+    challenge.extend([0; 30]);
+    challenge.extend(b"\r\n");
+    let mut port = fake(vec![
+        (b"\r\nwhoareyou.MyApp8\r\n".to_vec(), challenge),
+        (
+            b"SW_MODE1\r\n".to_vec(),
+            hex("5b020a006d000000000000000000"),
+        ),
+        (
+            hex("5a090102"),
+            hex("5a09120210312e372e3235303332342e3039313000"),
+        ),
+    ]);
+    port.cold = true;
+    let writes = port.writes.clone();
+    let mut session = Session::new(port);
+    session.set_timeout(Duration::from_millis(10));
+    assert_eq!(session.connect().unwrap(), "1.7.250324.0910");
+    assert_eq!(session.max_payload, 59);
+    assert_eq!(writes.lock().unwrap().len(), 6);
+}
+#[test]
+fn warm_session_skips_unlock() {
+    let port = fake(vec![
+        (hex("5a0300"), hex("5a03023b00")),
+        (
+            hex("5a090102"),
+            hex("5a09120210312e372e3235303332342e3039313000"),
+        ),
+    ]);
+    let writes = port.writes.clone();
+    assert!(X4::connect(port).is_ok());
+    assert_eq!(writes.lock().unwrap().len(), 2);
+}
+#[test]
+fn timeout_invalidates_session_and_never_retries_write() {
+    let port = Fake::default();
+    let writes = port.writes.clone();
+    let mut session = Session::new(port);
+    session.set_timeout(Duration::from_millis(1));
+    assert!(session.set(0x39, &[0, 5, 1]).is_err());
+    assert!(session.set(0x39, &[0, 5, 1]).is_err());
+    assert_eq!(writes.lock().unwrap().len(), 1);
+}
+#[test]
+fn failed_or_malformed_ack_is_not_success() {
+    for response in [ack(0x39, 0x81), wire(2, &[0x39, 0])] {
+        let mut session =
+            Session::new(fake(vec![(wire(0x39, &[0, 5, 1]), response)]));
+        assert!(session.set(0x39, &[0, 5, 1]).is_err());
+        assert!(!session.usable);
     }
-
-    #[test]
-    fn eq_all_constant_has_eleven_entries() {
-        assert_eq!(FeatureId::EQ_ALL.len(), 11);
-    }
-
-    #[test]
-    fn status_entries_parses_single_feature_response() {
-        // set_crystalizer_on: CrystalizerToggle = 1.0
-        let response = packet("5a 11 08 01 00 96 07 00 00 80 3f");
-        let entries: Vec<_> = features::status_entries(&response).collect();
-        assert_eq!(entries, vec![(0x96, 0x07, 1.0)]);
-    }
-
-    #[test]
-    fn status_entries_parses_multi_feature_push() {
-        // set_output_speakers: profile dump block with 8 features
-        let response = packet(
-            "5a 11 32 08 00 96 01 00 00 00 3f 96 03 00 00 00 3f \
-             96 05 a4 70 3d 3f 96 06 00 00 00 00 96 07 00 00 80 3f \
-             96 08 00 00 00 3f 96 09 00 00 80 3f 96 0a 00 00 00 00",
-        );
-        let entries: Vec<_> = features::status_entries(&response).collect();
-        assert_eq!(entries.len(), 8);
-        assert_eq!(entries[0], (0x96, 0x01, 0.5));
-        assert_eq!(entries[2], (0x96, 0x05, 0.74));
-        assert_eq!(entries[7], (0x96, 0x0a, 0.0));
-    }
-
-    #[test]
-    fn status_entries_ignores_other_commands() {
-        let response = packet("5a 26 0b 08 ff ff 05 00 00 00 00 00 00 00");
-        assert_eq!(features::status_entries(&response).count(), 0);
-    }
-
-    #[test]
-    fn dsp_addresses_are_unique_and_reversible() {
-        for &id in FeatureId::ALL {
-            let Some((family, feature_id)) = id.dsp_address() else {
-                continue;
-            };
-            assert_eq!(
-                FeatureId::from_dsp_address(family, feature_id),
-                Some(id),
-                "{:?} does not round-trip through its DSP address",
-                id
-            );
-        }
-    }
-
-    #[test]
-    fn encode_and_decode_round_trip() {
-        for &id in FeatureId::ALL {
-            let values: &[f32] = match id.value_kind() {
-                ValueKind::Preset(labels) => {
-                    &[0.0, 1.0, 2.0][..labels.len().min(3)]
-                }
-                _ => &[0.0, 0.5, 1.0],
-            };
-            for &value in values {
-                assert_eq!(
-                    id.decode(id.encode(value)),
-                    value,
-                    "{:?} does not round-trip {}",
-                    id,
-                    value
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn decoder_uses_device_values() {
-        // Normal = 2.0, Full = 1.0, Night = 3.0 on the wire
-        assert_eq!(FeatureId::Decoder.encode(0.0), 2.0);
-        assert_eq!(FeatureId::Decoder.encode(1.0), 1.0);
-        assert_eq!(FeatureId::Decoder.encode(2.0), 3.0);
-    }
-
-    #[test]
-    fn noise_reduction_uses_half_scale_on_device() {
-        // set_mic_noise_reduction_level-01: 0.11 on the wire = 22 %
-        let raw = f32::from_le_bytes([0xae, 0x47, 0xe1, 0x3d]);
-        let value = FeatureId::VoiceClarityNoiseReduction.decode(raw);
-        assert!((value - 0.22).abs() < 1e-6);
-    }
-
-    #[test]
-    fn mic_eq_presets_cover_all_bands_within_range() {
-        for (name, bands) in MIC_EQ_PRESETS {
-            assert_eq!(bands.len(), FeatureId::MIC_EQ_BANDS.len(), "{name}");
-            assert!(
-                bands.iter().all(|gain| (-12.0..=12.0).contains(gain)),
-                "{name} has a band outside of ±12 dB"
-            );
-        }
-    }
-
-    #[test]
-    fn reset_never_touches_mixer_or_output() {
-        for &id in FeatureId::ALL {
-            if id.alsa_element().is_some() || id == FeatureId::Output {
-                assert_eq!(id.reset_value(), None, "{:?}", id);
-            }
-        }
-    }
-
-    #[test]
-    fn profile_round_trip_keeps_unread_values() {
-        let features = features::all_features();
-        let json = serde_json::to_string(&features).unwrap();
-        let restored: Vec<features::Feature> =
-            serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.len(), features.len());
-        assert!(restored.iter().all(|feature| feature.value().is_nan()));
-    }
-
-    #[test]
-    fn profile_changes_only_include_differences_and_their_toggles() {
-        let current = features::all_features();
-        let set = |id: FeatureId, value: f32| {
-            current
-                .iter()
-                .find(|feature| feature.id == id)
-                .unwrap()
-                .set_cached(value)
+}
+#[test]
+fn unrelated_notifications_are_retained() {
+    let mut response = wire(0x2c, &[1, 4, 0, 0, 0]);
+    response.extend(hex("5a11080100960a000010c1"));
+    let mut dev = device(fake(vec![(hex("5a110301960a"), response)]));
+    assert_eq!(dev.eq_parameter(10).unwrap(), -9.0);
+    assert_eq!(dev.session.notifications.front().unwrap().command, 0x2c);
+}
+#[test]
+fn eq_and_profile_values_are_validated_before_any_io() {
+    let port = Fake::default();
+    let writes = port.writes.clone();
+    let mut dev = device(port);
+    for value in [f32::NAN, f32::INFINITY, -13.0, 13.0] {
+        let eq = Equalizer {
+            enabled: true,
+            preamp_db: value,
+            bands_db: [0.0; 10],
         };
-        set(FeatureId::LightingToggle, 0.0);
-        set(FeatureId::LightingColor, 0x00ff00 as f32);
-        set(FeatureId::CrystalizerToggle, 1.0);
-        set(FeatureId::CrystalizerLevel, 50.0);
-        // EqToggle stays NaN: couldn't be read
-
-        let saved = [
-            (FeatureId::LightingToggle, 0.0),
-            (FeatureId::LightingColor, 0xff0000 as f32),
-            (FeatureId::CrystalizerToggle, 1.0),
-            (FeatureId::CrystalizerLevel, 50.0),
-            (FeatureId::EqToggle, 0.0),
-        ];
-
-        assert_eq!(
-            crate::profile_changes(&current, &saved),
-            vec![
-                // unchanged, but the color write may switch it on
-                (FeatureId::LightingToggle, 0.0),
-                (FeatureId::LightingColor, 0xff0000 as f32),
-                (FeatureId::EqToggle, 0.0),
-            ]
-        );
-
-        set(FeatureId::LightingColor, 0xff0000 as f32);
-        set(FeatureId::EqToggle, 0.0);
-        assert!(crate::profile_changes(&current, &saved).is_empty());
+        assert!(dev.apply_eq(Output::Headphone, &eq).is_err());
     }
+    assert!(dev.set_feature(26, true).is_err());
+    assert!(writes.lock().unwrap().is_empty());
+    let eq = Equalizer {
+        enabled: true,
+        preamp_db: 0.0,
+        bands_db: [0.0; 10],
+    };
+    assert!(
+        Preset::new(Output::Speaker, eq)
+            .validate(Output::Headphone)
+            .is_err()
+    );
+    assert!(serde_json::from_str::<Preset>(r#"{"sbx":true}"#).is_err());
+}
+#[test]
+fn feature_change_requires_support_ack_and_matching_readback() {
+    for (actual, succeeds) in [(0x20, true), (0, false)] {
+        let port = fake(vec![
+            (
+                wire(0x39, &[2]),
+                wire(0x39, &[2, 0x60, 0, 0, 0, 0, 0, 0, 0]),
+            ),
+            (wire(0x39, &[0, 5, 1]), ack(0x39, 0)),
+            (
+                wire(0x39, &[1, 255, 255, 255, 255]),
+                wire(0x39, &[1, actual, 0, 0, 0]),
+            ),
+        ]);
+        let writes = port.writes.clone();
+        let mut dev = device(port);
+        assert_eq!(dev.set_feature(5, true).is_ok(), succeeds);
+        assert_eq!(
+            writes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|w| **w == wire(0x39, &[0, 5, 1]))
+                .count(),
+            1
+        );
+    }
+}
+#[test]
+fn recorded_eq_response() {
+    let rows: serde_json::Value = serde_json::from_str(include_str!(
+        "../tests/fixtures/control-reads.json"
+    ))
+    .unwrap();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["label"] == "dsp_96_0a")
+        .unwrap();
+    let mut dev = device(fake(vec![(
+        hex(row["tx"].as_str().unwrap()),
+        hex(row["rx"].as_str().unwrap()),
+    )]));
+    assert_eq!(dev.eq_parameter(10).unwrap(), -9.0);
+}
+#[test]
+fn profile_assembles_captured_blocks_and_rejects_wrong_order() {
+    let rows: serde_json::Value = serde_json::from_str(include_str!(
+        "../tests/fixtures/capabilities.json"
+    ))
+    .unwrap();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["label"] == "device_profile_page2")
+        .unwrap();
+    let tx = hex(row["tx"].as_str().unwrap());
+    let rx = hex(row["rx"].as_str().unwrap());
+    let mut dev = device(fake(vec![(tx.clone(), rx.clone())]));
+    let eq = dev.stored_profile(Output::Headphone).unwrap();
+    assert_eq!(eq.preamp_db, -9.0);
+    assert_eq!(eq.bands_db[1], 9.0);
+    let mut frames = Parser::default().feed(&rx).unwrap();
+    frames[1].payload[6] = 2;
+    let bad = frames
+        .iter()
+        .flat_map(|f| wire(f.command, &f.payload))
+        .collect();
+    assert!(
+        device(fake(vec![(tx, bad)]))
+            .stored_profile(Output::Headphone)
+            .is_err()
+    );
+}
+
+#[test]
+fn eq_write_requires_independent_readback_and_poison_on_mismatch() {
+    for (actual, succeeds) in [(-9.5_f32, true), (-9.0, false)] {
+        let mut set = vec![1, 0x96, 10];
+        set.extend((-9.5_f32).to_le_bytes());
+        let mut response = vec![1, 0, 0x96, 10];
+        response.extend(actual.to_le_bytes());
+        let port = fake(vec![
+            (wire(0x12, &set), ack(0x12, 0)),
+            (wire(0x11, &[1, 0x96, 10]), wire(0x11, &response)),
+        ]);
+        let writes = port.writes.clone();
+        let mut dev = device(port);
+        assert_eq!(dev.set_eq_parameter(10, -9.5).is_ok(), succeeds);
+        assert_eq!(writes.lock().unwrap().len(), 2);
+        assert_eq!(dev.session.usable, succeeds);
+    }
+}
+
+#[test]
+fn apply_eq_rejects_output_change_before_writes() {
+    let port = fake(vec![
+        (wire(0x10, &[]), wire(0x10, &[0x40, 0, 0, 0, 0, 0, 0, 0])),
+        (wire(0x2c, &[1]), wire(0x2c, &[1, 1, 0, 0, 0])),
+    ]);
+    let writes = port.writes.clone();
+    let mut dev = device(port);
+    let eq = Equalizer {
+        enabled: true,
+        preamp_db: -9.0,
+        bands_db: [0.0; 10],
+    };
+    assert!(dev.apply_eq(Output::Headphone, &eq).is_err());
+    assert!(writes.lock().unwrap().iter().all(|w| w[1] != 0x12));
 }

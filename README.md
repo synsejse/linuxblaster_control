@@ -1,281 +1,117 @@
-# Linuxblaster Control 
-(because it sounds mildly funny) 
+# Linuxblaster Control — Sound Blaster X4
 
-A native Linux GUI application to control the **Creative Sound BlasterX G6** USB DAC/Amp, with full [AutoEq](https://github.com/jaakkopasanen/AutoEq) integration. 
+A Rust/egui controller for the **Creative Sound Blaster X4 / SB1815 (`041e:3278`)**,
+forked from [RizeCrime/linuxblaster_control](https://github.com/RizeCrime/linuxblaster_control).
+The upstream MIT license and Git history are preserved. This branch targets the X4,
+not the G6. The X4 backend is a Rust implementation of the accompanying X4 protocol research.
 
-![Screenshot](LinuxblasterControl.png)
+Audio uses Linux's `snd-usb-audio`; proprietary settings use `cdc_acm` through
+`/dev/ttyACM*`. The app never detaches the audio driver or resets the USB device.
+It does not require vendor DLLs, a new kernel driver, Python, or a D-Bus daemon.
+One background worker owns the serial connection, serializes commands and refreshes
+state every three seconds. Disconnects trigger reconnect attempts; failed writes
+are never replayed. Closing the window closes the app.
 
-## Installation
+## Available controls
 
-You don't need to know anything about programming to use this. Download one file, install it like any other app, and you're done.
+- Read firmware, capabilities, output, Direct Mode, headphone gain and hardware EQ.
+- Switch speakers/headphones; toggle Direct Mode and headphone gain.
+- Enable/disable EQ and edit preamp plus ten hardware EQ bands.
+- Save/load local EQ presets, tagged for X4 and speaker/headphone output.
+  Loading previews the preset; **Apply EQ** performs the changes.
+- Read stored speaker/headphone device profiles as JSON (`--profiles`).
 
-### 1. Download the right file
+Every setter requires a successful acknowledgement and matching readback. EQ
+application is a sequence of individual changes, not an atomic transaction: a failure
+can leave a partially applied EQ. The app reports this and reconnects to read actual state.
+It never restores presets automatically on reconnect.
 
-Go to the **[latest release](https://github.com/RizeCrime/linuxblaster_control/releases/latest)** and download **one** file from the *Assets* list:
+**Experimental:** recorded research proves the unlock, reads and EQ preamp changes
+on firmware `1.7.250324.0910`. Routing/Direct Mode/gain setters are based on vendor
+protocol analysis; the research did not exercise them on this unit. Live Linux status/profile reads and the native GUI have also passed. Linux cold plug,
+suspend/resume, acoustic behavior and PCM formats still require hardware validation.
+See [protocol details](docs/PROTOCOL.md) and [validation](docs/VALIDATION.md).
 
-| Your Linux                                                     | Download the file ending in |
-|----------------------------------------------------------------|-----------------------------|
-| **Ubuntu, Linux Mint, Pop!_OS, Zorin OS, elementary OS, Debian** | `_amd64.deb`                |
-| **Fedora, Nobara, openSUSE**                                   | `.x86_64.rpm`               |
-| **Anything else** (Arch, Manjaro, EndeavourOS, Bazzite, …), or if you'd rather not install anything | `-x86_64.AppImage` |
-| **NixOS**                                                      | see [NixOS](#nixos) below   |
+EQ band frequencies and device limits have not been established. Bands are numbered
+1–10 in the GUI; the application's ±12 dB input bound is conservative, not a queried
+hardware capability. Therefore the upstream G6 AutoEq frequency mapping is not used.
+G6 SBX, lighting, microphone DSP, mixer setters, Scout Mode and DAC filters are not
+exposed. SXFI/personalization, SmartComms and stored-profile writes are unresolved.
+Use ALSA/PipeWire for ordinary volume, recording and sample-rate configuration.
+The G6-specific HID backend, USB reset helpers, capture tools and cold-boot workarounds
+were removed from this branch; they remain available in upstream Git history.
 
-> [!TIP]
-> Almost every desktop PC and laptop needs the `amd64` / `x86_64` files.
-> The `arm64` / `aarch64` files are only for ARM computers, such as a Raspberry Pi or a Snapdragon laptop.
+## Build and run
 
-### 2. Install it
+On Linux, install a current Rust toolchain, `pkg-config` and the libudev development
+package (e.g. `libudev-dev` on Debian/Ubuntu). The desktop needs its usual Wayland/X11
+and graphics libraries; the file dialog uses the desktop portal/D-Bus.
 
-**`.deb` (Ubuntu, Mint, …):** double-click the file and click *Install*.
-If double-clicking doesn't work, open a terminal in your Downloads folder and run:
-```bash
-sudo apt install ./linuxblaster-control_*_amd64.deb
+```sh
+cargo build --locked --release
+./target/release/linuxblaster_control
+./target/release/linuxblaster_control --status
+./target/release/linuxblaster_control --profiles
+./target/release/linuxblaster_control --port /dev/serial/by-id/usb-Creative_Technology_Ltd_Sound_Blaster_X4_YOUR_SERIAL-if01
 ```
 
-**`.rpm` (Fedora, openSUSE):** double-click the file and click *Install*, or run:
-```bash
-sudo dnf install ./linuxblaster-control-*.x86_64.rpm      # Fedora
-sudo zypper install ./linuxblaster-control-*.x86_64.rpm   # openSUSE
+Automatic selection requires exactly one X4. `--port` accepts a stable by-id path,
+and verifies its USB identity before opening it. Close the GUI before using a CLI
+query or another controller. Queries may unlock the control channel but do not
+change audio settings. G6 profile JSON and old G6 CLI flags are not compatible.
+
+Install the narrowly scoped desktop access rule, then replug the device:
+
+```sh
+sudo install -m 0644 packaging/70-linuxblaster-control.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
 ```
 
-**AppImage:** no installation needed. Right-click the file → *Properties* → *Permissions* → enable *Allow executing file as program* (the exact wording depends on your desktop). Then double-click it.
+The rule grants access to the active local desktop session and tells ModemManager
+to ignore the X4. Headless users need their distribution's serial-device access
+policy, commonly membership in `dialout`. Run the app as your ordinary user.
 
-### 3. Start it
+## NixOS
 
-Plug in your G6 and open **Linuxblaster Control** from your application menu (or double-click the AppImage).
+```sh
+nix develop
+cargo test --locked --all-targets
+cargo run
+# Build the packaged application, without installing or activating anything:
+nix build
+```
 
-The first time you start the AppImage, the app will ask to **allow access** to the G6. That's a one-time setup that lets your user account control the device. Click *Allow access* and enter your password. The `.deb` and `.rpm` packages do this automatically during installation.
-
-### Uninstall
-
-- `.deb`: `sudo apt remove linuxblaster-control`
-- `.rpm`: `sudo dnf remove linuxblaster-control` (or `sudo zypper remove linuxblaster-control`)
-- AppImage: delete the file. To also remove the access rule: `sudo rm /etc/udev/rules.d/70-linuxblaster-control.rules`
-
-Your saved profiles stay in `~/.local/share/linuxblaster/profiles/`.
-
-### NixOS
-
-Add the flake to your configuration; this installs the app (with menu entry) and the access rule:
+The flake exports `packages.<system>.blaster-x4-control` and a NixOS module:
 
 ```nix
-{
-  inputs.linuxblaster_control.url = "github:RizeCrime/linuxblaster_control";
+# Flake input:
+inputs.linuxblaster_control.url = "github:synsejse/linuxblaster_control/x4-support";
 
-  outputs = { self, nixpkgs, linuxblaster_control, ... }: {
-    nixosConfigurations.yourhostname = nixpkgs.lib.nixosSystem {
-      modules = [
-        linuxblaster_control.nixosModules.default
-        {
-          hardware.soundblaster-g6.enable = true;
-        }
-      ];
-    };
-  };
-}
+# In your NixOS modules list:
+linuxblaster_control.nixosModules.default
+{ hardware.soundblaster-x4.enable = true; }
 ```
 
-Or try it without installing: `nix run github:RizeCrime/linuxblaster_control`
+The module installs the app and X4 udev rule. It does not change audio drivers.
+The provided package builds on x86_64-linux and aarch64-linux; only the local
+architecture is covered by the validation report. Release packaging for tar/deb/rpm/
+AppImage is retained but needs separate distribution testing.
 
-## Troubleshooting
+## Development
 
-**"No Sound BlasterX G6 found"**
-Make sure the G6 is connected with a USB *data* cable (not a charge-only cable) and switched on. The app connects by itself as soon as the G6 shows up.
-
-**"Access is not allowed yet", even after clicking *Allow access***
-Unplug the G6 and plug it back in, then click *Try again*.
-
-**The AppImage doesn't start when double-clicked**
-Check that it's allowed to run (see step 2). On some systems AppImages also need FUSE: install `libfuse2` (Ubuntu 22.04, Debian) or `libfuse2t64` (Ubuntu 24.04 and newer), or use the `.deb`/`.rpm` instead.
-
-**My microphone isn't picked up**
-Open *Mixer* → *Recording Source* and select **External Mic**. (The G6 starts on *Line In* on Linux.)
-
-**My settings changed when I switched between Speakers and Headphones**
-That's how the G6 works: it keeps a separate set of settings for each output.
-
-**Something else is wrong**
-Start the app from a terminal with `linuxblaster_control` (or `./Linuxblaster_Control-*.AppImage`) and [open an issue](https://github.com/RizeCrime/linuxblaster_control/issues) with what it prints.
-
-## About
-
-The app reads the current state from the G6 itself, so it always shows what the device is actually set to.
-The G6 has two internal settings profiles, one for Headphones and one for Speakers; the app refreshes everything when you switch the output.
-Changes made on the device itself (e.g. the SBX and Scout Mode buttons) and to the hardware mixer (e.g. the volume knob) show up while the app is running.
-
-## Supported Features
-
-- **State Reading**
-- **Profiles**
-	- Saving & Loading
-	- Profile Save Location
-- **SBX**
-	- Surround Sound
-	- Dialog+
-	- Smart Volume (incl. Night & Loud Mode)
-	- Crystalizer 
-	- Bass 
-	- Equalizer 
-		- PreAmp
-		- 10-band EQ
-		- AutoEq Profiles
-- **Playback**
-	- Output Select 
-	- DAC Filter
-- **Recording**
-	- Mic Recording Volume & Monitoring
-	- Mic Boost
-	- Voice Clarity: Noise Reduction, Acoustic Echo Cancellation, Smart Volume
-	- Mic EQ (Presets & individual Bands)
-- **Decoder**
-	- Normal, Full, and Night
-- **Mixer**
-	- Playback, Monitoring, and Recording Levels
-	- Recording Source
-- **Lighting**
-	- On/Off & Color
-- **Scout Mode** 
-
-## Not-Implemented Features
-
-- **Playback**
-  - Direct Mode (not planned) 
-  - Speaker/Headphone Channel Configuration (Stereo/5.1/7.1)
-- **Lighting**
-  - Effects other than a static color (no captures yet)
-
-**Audio Quality** (bit depth / sample rate) is not a setting of the device: whatever plays or records audio picks the format for each stream (on Linux that's usually PipeWire). Configure it there, e.g. with PipeWire's `default.clock.allowed-rates`.
-
-### About the Mixer
-
-The Mixer (and the volume/monitoring sliders in Recording) are the G6's own hardware controls, defined by the USB Audio Class standard. They're changed through ALSA, which only forwards them to the device, the same way Windows does. Nothing is processed in software, so recordings stay exactly as the hardware produces them.
-
-## Profiles
-
-Profiles are stored as JSON files in `~/.local/share/linuxblaster/profiles/`.
-A profile applies to the output that is currently active (Speakers or Headphones).
-Profiles from before v2.1 will have to be remade, the old format is no longer compatible.
-
-### Applying a profile on startup
-
-The G6 forgets its settings when it's reset or unplugged (lighting comes back on, effects are off, ...).
-To get them back automatically, start the app with one of these options, e.g. in its autostart entry (`Exec=linuxblaster_control --apply-last`):
-
-- `--apply-last` applies the profile you loaded or saved last in the app.
-  The app remembers it from the first time you load or save a profile with this version.
-- `--apply-profile <file>` applies the given profile file.
-
-The profile is applied as soon as the G6 is connected, also if it only shows up a few seconds after the app started.
-Only the settings that differ from what the device reports are written.
-
-> [!IMPORTANT]
-> The profile format is custom to this application and is **not compatible** with official Creative Sound Blaster Command profiles (.json or .xml) from Windows.
-
-## System Tray
-
-The app shows an icon in the system tray (KDE Plasma and most other desktops; GNOME needs the *AppIndicator* extension). Its menu can show or hide the window, switch the lighting on and off, and quit. A left click on the icon shows or hides the window.
-
-Closing the window hides it in the tray. If there is no tray, closing the window quits as before.
-
-| Flag                         | Effect                                                         |
-|------------------------------|----------------------------------------------------------------|
-| `--tray` (or `--minimized`)  | Start hidden in the tray, e.g. for autostart                   |
-| `--minimize-to-tray`         | Minimizing the window also hides it in the tray (X11 only)     |
-| `--no-tray`                  | No tray icon; closing the window quits                         |
-
-To start the app in the tray when you log in, add `linuxblaster_control --tray` to your desktop's autostart (KDE: *System Settings → Autostart → Add → Add Application*, then add `--tray` to the command). If the tray isn't there yet when the app starts, it waits up to 10 seconds for it before showing the window instead.
-
-## For Developers
-
-### Building from Source
-
-You need a Rust toolchain and these development packages:
-
-| Distro          | Packages                                    |
-|-----------------|---------------------------------------------|
-| Debian / Ubuntu | `pkg-config libudev-dev libasound2-dev`     |
-| Fedora          | `pkgconf systemd-devel alsa-lib-devel`      |
-| Arch            | `pkgconf systemd-libs alsa-lib`             |
-
-```bash
-git clone https://github.com/RizeCrime/linuxblaster_control.git
-cd linuxblaster_control
-cargo build --release
-./target/release/linuxblaster_control
+```sh
+cargo fmt --check
+cargo test --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
 ```
 
-Without the packages, you'll also need the udev rule for access to the device: copy [`packaging/70-linuxblaster-control.rules`](packaging/70-linuxblaster-control.rules) to `/etc/udev/rules.d/` (or use the *Allow access* button in the app).
+- `src/protocol.rs`: framing, unlock and serial transactions.
+- `src/lib.rs`: X4 capabilities, settings, presets and profile decoding.
+- `src/app.rs`: background device worker and native GUI.
+- `src/tests.rs`, `tests/fixtures`: deterministic tests using recorded X4 traffic.
 
-The device is accessed through the kernel's hidraw interface. The app never resets the USB device: a reset wakes the HID endpoint but leaves the audio interface unusable until the next re-enumeration, which breaks playback for the rest of the session. Instead it waits and retries the endpoint, reopening the hidraw node when the device re-enumerated.
+No test accesses real hardware. Test fixtures contain selected, unchanged packet bytes from the research folder;
+protocol provenance is recorded in `docs/RESEARCH.md`. Its evidence paths refer to
+the original research bundle, which is not fully duplicated in this fork.
 
-To print the current device state without the GUI (read-only):
-
-```bash
-cargo run --example dump_state
-```
-
-### Nix
-
-```bash
-nix develop   # development shell with all dependencies
-nix build     # build the package
-```
-
-### Cold boot
-
-On some machines the G6 comes out of a cold boot with a dead HID endpoint and a broken first audio enumeration (`selector reported illegal value`). The app cannot repair that while it runs: resetting the device would break audio for the whole session. The optional helper does the reset once, at boot, before PipeWire opens the device:
-
-```bash
-sudo packaging/coldboot/install.sh
-```
-
-It runs from the G6's udev `add` event, is not part of the boot transaction, and does not delay the display manager. It holds `snd-usb-audio` back from the first enumeration and loads it after a clean re-enumeration. **Side effect:** the blacklist is per module, so another USB audio device attached at boot needs `sudo modprobe snd-usb-audio` once. Details, verification steps and removal: [`packaging/coldboot/README.md`](packaging/coldboot/README.md).
-
-### Release Packages
-
-[`packaging/build-release.sh`](packaging/build-release.sh) builds the `.tar.gz`, `.deb`, `.rpm` and AppImage for the current architecture into `dist/`.
-On GitHub, the [Release workflow](.github/workflows/release.yml) runs it for x86_64 and aarch64 whenever a release is published and attaches the files to the release. The package version is taken from the release tag.
-
-## ⚠️ Development Status
-
-**This project is in active development and should be considered experimental.**
-
-### Current Limitations
-
-- **Limited testing** — Tested only on the developer's hardware.
-- The USB protocol was reverse-engineered and may not cover all device features.
-- Some features available in the Windows Sound Blaster Command software are not yet implemented.
-
-## Technical Details
-
-- **Vendor ID:** `0x041e` (Creative Technology)
-- **Product ID:** `0x3256` (Sound Blaster X G6)
-- **Interface:** 4 (HID control interface)
-
-Communication uses 65-byte HID reports with a custom protocol consisting of DATA and COMMIT packets.
-
-Find the details in [UsbProtocol](UsbProtocol.md).  
-
-## Contributing
-
-Contributions are welcome! If you have a Sound Blaster X G6 and want to help:
-
-- Report bugs or missing features
-- Help reverse-engineer additional functionality
-
-## Acknowledgments
-
-~~This project builds upon the USB protocol research from the [soundblaster-x-g6-cli](https://github.com/nils-skowasch/soundblaster-x-g6-cli) project by Nils Skowasch, which provided initial USB packet captures and protocol documentation. Additional reverse engineering (including the 10-band EQ protocol) was done for this project.~~  
-The initial versions of this project were based on the [soundblaster-x-g6-cli](https://github.com/nils-skowasch/soundblaster-x-g6-cli) project. However, it turns out that this work was misleadingly incomplete. What was thought to be a Commit Push from the Host was actually the Device reporting back a queried value, just as an example. I have done a bunch of extra reverse engineering to figure out the actual full protocol (see the sniffer directory), at least I _think_ that I've got the full picture this time; but that's also what I thought before, so who knows /shrug. 
-
-## AI Disclaimer 
-
-~~With v2 I can proudly say that almost all Code was written by me (In v1 the GUI was written by AI (and you could tell)), and AI only filled out match arms and enums for me. 
-I also use AI liberally to beautify anything user-facing (including this README and most other .md files).  
-Oh and the math for the EQ curve visualizer was also done by AI.~~
-After getting the project to a "good enough" state for my own purposes, I sadly don't have the time for this project anymore.  
-It will mostly be maintained by an LLM under my supervision from v2.2 and onwards. 
-
-## License
-
-MIT License — see [LICENSE](LICENSE) for details.
+![X4 controller showing live device settings](docs/x4.png)

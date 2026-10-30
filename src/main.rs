@@ -1,200 +1,112 @@
-#![allow(unused)]
-
-use std::path::PathBuf;
-use std::sync::LazyLock;
-
-use eframe::egui::{self, Vec2, ahash::HashMap, mutex::Mutex};
-use linuxblaster_control::BlasterXG6;
-use tracing::{Level, warn};
-
 mod app;
-mod tray;
-use app::Launcher;
+use linuxblaster_control::{Output, open};
 
-fn main() -> eframe::Result<()> {
-    // RUST_LOG overrides this, e.g. RUST_LOG=debug linuxblaster_control
-    let default_level = if cfg!(debug_assertions) {
-        Level::DEBUG
-    } else {
-        Level::INFO
-    };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(default_level.into())
-                .from_env_lossy(),
-        )
-        .init();
+const USAGE: &str = "Linuxblaster Control — Sound Blaster X4
+Usage: linuxblaster_control [--port /dev/serial/by-id/...] [--status | --profiles]
 
-    let startup_profile = match parse_args(std::env::args().skip(1)) {
-        Ok(Command::Help) => {
-            print!("{}", USAGE);
-            return Ok(());
-        }
-        Ok(Command::Run(None)) => None,
-        Ok(Command::Run(Some(StartupProfile::File(path)))) => Some(path),
-        Ok(Command::Run(Some(StartupProfile::Last))) => {
-            let last = linuxblaster_control::last_profile();
-            if last.is_none() {
-                warn!(
-                    "--apply-last: no profile has been loaded or saved yet, \
-                     nothing to apply"
-                );
-            }
-            last
-        }
-        Err(message) => {
-            eprintln!("{}\n\n{}", message, USAGE);
-            std::process::exit(2);
-        }
-    };
-
-    let app = Launcher::new(startup_profile);
-
-    let icon = eframe::icon_data::from_png_bytes(include_bytes!(
-        "../packaging/linuxblaster-control.png"
-    ))
-    .expect("bundled icon is a valid PNG");
-
-    // a new window is opened each time it's shown from the tray
-    let options = || eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Linuxblaster Control")
-            // matches the .desktop file, so the taskbar shows the right icon
-            .with_app_id("linuxblaster-control")
-            .with_icon(icon.clone())
-            .with_resizable(true)
-            .with_inner_size(Vec2::new(1050.0, 600.0))
-            // the two-column panes need at least this much room
-            .with_min_inner_size(Vec2::new(1050.0, 600.0)),
-        // .with_inner_size()
-        ..Default::default()
-    };
-
-    tray::run(app, options, |cc| {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
-        cc.egui_ctx.set_pixels_per_point(1.5);
-
-        #[cfg(debug_assertions)]
-        {
-            cc.egui_ctx.debug_painter();
-            cc.egui_ctx.set_debug_on_hover(false);
-        }
-    })
-}
-
-const USAGE: &str = "\
-Usage: linuxblaster_control [OPTIONS]
-
-Options:
-  --apply-last            Apply the profile that was loaded or saved last
-  --apply-profile <FILE>  Apply this profile
-  --tray, --minimized     Start hidden in the system tray
-  --minimize-to-tray      Minimizing also hides the window in the tray (X11 only)
-  --no-tray               No tray icon; closing the window quits
-  -h, --help              Print this help
-
-The profile is applied to the active output once the G6 is connected.
-Only settings that differ from the device's current state are written.
-";
+Without a query option, opens the GUI. --status and --profiles print JSON.
+Queries may unlock the control channel but do not change audio settings.
+Only one controller can own the X4 serial connection at a time.";
 
 #[derive(Debug, PartialEq)]
-enum Command {
-    Help,
-    Run(Option<StartupProfile>),
+struct Options {
+    port: Option<String>,
+    query: Option<String>,
+    help: bool,
 }
-
-#[derive(Debug, PartialEq)]
-enum StartupProfile {
-    Last,
-    File(PathBuf),
-}
-
 fn parse_args(
     mut args: impl Iterator<Item = String>,
-) -> Result<Command, String> {
-    let mut profile = None;
+) -> Result<Options, String> {
+    let mut options = Options {
+        port: None,
+        query: None,
+        help: false,
+    };
     while let Some(arg) = args.next() {
-        let next = match arg.as_str() {
-            "-h" | "--help" => return Ok(Command::Help),
-            "--apply-last" => StartupProfile::Last,
-            // read by tray::TrayOptions::from_args
-            "--tray" | "--minimized" | "--no-tray" | "--minimize-to-tray" => {
-                continue;
+        match arg.as_str() {
+            "--help" | "-h" => options.help = true,
+            "--port" => {
+                options.port = Some(
+                    args.next()
+                        .filter(|s| !s.starts_with('-'))
+                        .ok_or("--port requires a path")?,
+                )
             }
-            "--apply-profile" => {
-                let path = args
-                    .next()
-                    .ok_or("--apply-profile needs a profile file")?;
-                StartupProfile::File(PathBuf::from(path))
+            "--status" | "--profiles" if options.query.is_none() => {
+                options.query = Some(arg)
             }
-            other => match other.strip_prefix("--apply-profile=") {
-                Some(path) if !path.is_empty() => {
-                    StartupProfile::File(PathBuf::from(path))
-                }
-                Some(_) => return Err("--apply-profile needs a profile file".into()),
-                None => return Err(format!("Unknown argument: {}", other)),
-            },
-        };
-        if profile.is_some() {
-            return Err(
-                "Use only one of --apply-last and --apply-profile".into()
-            );
+            _ => return Err(format!("Unknown or conflicting argument: {arg}")),
         }
-        profile = Some(next);
     }
-    Ok(Command::Run(profile))
+    Ok(options)
 }
-
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+    let options = parse_args(std::env::args().skip(1))?;
+    if options.help {
+        println!("{USAGE}");
+        return Ok(());
+    }
+    if let Some(query) = options.query {
+        let mut device =
+            open(options.port.as_deref()).map_err(|e| e.to_string())?;
+        let value = if query == "--status" {
+            serde_json::to_value(device.state().map_err(|e| e.to_string())?)?
+        } else {
+            serde_json::json!({
+                "speaker": device.stored_profile(Output::Speaker).map_err(|e| e.to_string())?,
+                "headphone": device.stored_profile(Output::Headphone).map_err(|e| e.to_string())?,
+            })
+        };
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!(
+        "../packaging/linuxblaster-control.png"
+    ))?;
+    let native = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title("Linuxblaster Control — X4")
+            .with_app_id("linuxblaster-control")
+            .with_icon(icon)
+            .with_inner_size([900.0, 680.0])
+            .with_min_inner_size([800.0, 620.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Linuxblaster Control — X4",
+        native,
+        Box::new(move |cc| {
+            cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
+            Ok(Box::new(app::X4App::new(options.port, cc.egui_ctx.clone())))
+        }),
+    )?;
+    Ok(())
+}
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn parse(args: &[&str]) -> Result<Command, String> {
-        parse_args(args.iter().map(|arg| arg.to_string()))
-    }
-
     #[test]
-    fn startup_profile_arguments() {
-        assert_eq!(parse(&[]), Ok(Command::Run(None)));
+    fn cli_rejects_conflicts_and_missing_port() {
+        let parse =
+            |args: &[&str]| parse_args(args.iter().map(|s| s.to_string()));
+        assert!(parse(&["--port"]).is_err());
+        assert!(parse(&["--port", "--status"]).is_err());
+        assert!(parse(&["--status", "--profiles"]).is_err());
         assert_eq!(
-            parse(&["--apply-last"]),
-            Ok(Command::Run(Some(StartupProfile::Last)))
-        );
-        let file = Ok(Command::Run(Some(StartupProfile::File(
-            PathBuf::from("a b.json"),
-        ))));
-        assert_eq!(parse(&["--apply-profile", "a b.json"]), file);
-        assert_eq!(parse(&["--apply-profile=a b.json"]), file);
-        assert_eq!(parse(&["--help", "--bogus"]), Ok(Command::Help));
-        assert!(parse(&["--apply-profile"]).is_err());
-        assert!(parse(&["--apply-profile="]).is_err());
-        assert!(parse(&["--apply-last", "--apply-profile", "x"]).is_err());
-        assert!(parse(&["--bogus"]).is_err());
-        assert_eq!(
-            parse(&["--tray", "--apply-last", "--no-tray"]),
-            Ok(Command::Run(Some(StartupProfile::Last)))
+            parse(&["--port", "/dev/ttyACM0", "--status"])
+                .unwrap()
+                .port
+                .as_deref(),
+            Some("/dev/ttyACM0")
         );
     }
 }
-
-/// Results from "<headphone_name> FixedBandEQ.txt"
-/// mapped to ten bands (31Hz, 62Hz, 125Hz, 250Hz, 500Hz, 1kHz, 2kHz, 4kHz, 8kHz, 16kHz)
-#[derive(Debug, Clone)]
-pub struct HeadphoneResult {
-    pub tester: &'static str,
-    pub variant: Option<&'static str>,
-    pub test_device: Option<&'static str>,
-    pub preamp: f32,
-    pub ten_band_eq: [f32; 10],
-}
-
-struct AutoEqDb {
-    // HashMap
-    // Key: Name (DT 990 Pro (250 Ohm))
-    // Value: Vec<HeadphoneResult>
-    results:
-        Option<&'static phf::Map<&'static str, &'static [HeadphoneResult]>>,
-}
-
-include!(concat!(env!("OUT_DIR"), "/autoeq_db.rs"));

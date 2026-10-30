@@ -8,7 +8,7 @@
 #
 # Used by .github/workflows/release.yml, but runs anywhere with:
 #   - a Rust toolchain, cargo-deb and cargo-generate-rpm
-#   - the build dependencies: pkg-config, libudev-dev, libasound2-dev
+#   - the build dependencies: pkg-config, libudev-dev
 #   - curl and file (for the AppImage tooling)
 #
 # Usage: packaging/build-release.sh [version]
@@ -82,7 +82,7 @@ install -Dm644 packaging/linuxblaster-control.png "$APPDIR/usr/share/icons/hicol
 cp packaging/linuxblaster-control.desktop packaging/linuxblaster-control.png "$APPDIR/"
 ln -s usr/bin/linuxblaster_control "$APPDIR/AppRun"
 
-# The binary only links glibc, libudev and libasound, which every desktop
+# The binary only links glibc and libudev, which every desktop
 # distro ships; the GUI libraries are loaded at runtime from the system.
 # Bundling them would break more than it fixes, so nothing else goes in.
 # (APPIMAGE_EXTRACT_AND_RUN: works in containers/CI without FUSE)

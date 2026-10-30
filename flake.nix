@@ -1,5 +1,5 @@
 {
-  description = "Linuxblaster Control - A native GUI application to control the Creative Sound Blaster X G6";
+  description = "Linuxblaster Control - A native GUI application to control the Creative Sound Blaster X4";
 
   inputs = {
     nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1"; # unstable Nixpkgs
@@ -16,8 +16,6 @@
       supportedSystems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
-        "aarch64-darwin"
       ];
       forEachSupportedSystem =
         f:
@@ -48,7 +46,7 @@
             ]
           );
 
-        blaster-x-g6-control = prev.callPackage ./nix/package.nix {
+        blaster-x4-control = prev.callPackage ./nix/package.nix {
           rustPlatform = prev.makeRustPlatform {
             cargo = final.rustToolchain;
             rustc = final.rustToolchain;
@@ -59,8 +57,8 @@
       packages = forEachSupportedSystem (
         { pkgs }:
         {
-          default = pkgs.blaster-x-g6-control;
-          blaster-x-g6-control = pkgs.blaster-x-g6-control;
+          default = pkgs.blaster-x4-control;
+          blaster-x4-control = pkgs.blaster-x4-control;
           # .deb/.rpm/AppImage packages are built by packaging/build-release.sh
         }
       );
@@ -70,19 +68,17 @@
         {
           default = pkgs.mkShell {
             packages = with pkgs; [
-              udev 
-              alsa-lib
+              udev
               dbus
               rustToolchain
               openssl
               pkg-config
-              libusb1
               cargo-deny
               cargo-edit
               cargo-watch
               rust-analyzer
               bacon
-              evcxr 
+              evcxr
 
               # wayland support
               wayland
@@ -90,20 +86,12 @@
               libGL
               libglvnd
 
-              # python
-              (pkgs.python312.withPackages (
-                python-pkgs: with python-pkgs; [
-                  pyusb
-                  libusb1 
-                  hidapi 
-                ]
-              ))
             ];
 
             env = {
               # Required by rust-analyzer
               RUST_SRC_PATH = "${pkgs.rustToolchain}/lib/rustlib/src/rust/library";
-              LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [ pkgs.udev pkgs.alsa-lib pkgs.dbus pkgs.wayland pkgs.libxkbcommon pkgs.libGL pkgs.libglvnd pkgs.openssl pkgs.libusb1]}";
+              LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [ pkgs.udev pkgs.dbus pkgs.wayland pkgs.libxkbcommon pkgs.libGL pkgs.libglvnd pkgs.openssl]}";
             };
           };
         }
@@ -113,11 +101,11 @@
       nixosModules.default = { config, lib, pkgs, ... }:
         with lib;
         let
-          cfg = config.hardware.soundblaster-g6;
+          cfg = config.hardware.soundblaster-x4;
         in
         {
-          options.hardware.soundblaster-g6 = {
-            enable = mkEnableOption "Sound Blaster X G6 support";
+          options.hardware.soundblaster-x4 = {
+            enable = mkEnableOption "Sound Blaster X4 support";
             commandName = mkOption {
               type = types.str;
               default = "linuxblaster";
@@ -127,16 +115,16 @@
 
           config = mkIf cfg.enable {
             # Install the control application
-            environment.systemPackages = [ 
-              self.packages.${pkgs.system}.blaster-x-g6-control
+            environment.systemPackages = [
+              self.packages.${pkgs.stdenv.hostPlatform.system}.blaster-x4-control
               (pkgs.runCommand "linuxblaster-symlink" {} ''
                 mkdir -p $out/bin
-                ln -s ${self.packages.${pkgs.system}.blaster-x-g6-control}/bin/linuxblaster_control $out/bin/${cfg.commandName}
+                ln -s ${self.packages.${pkgs.stdenv.hostPlatform.system}.blaster-x4-control}/bin/linuxblaster_control $out/bin/${cfg.commandName}
               '')
             ];
 
             # udev rule for device access (lib/udev/rules.d in the package)
-            services.udev.packages = [ self.packages.${pkgs.system}.blaster-x-g6-control ];
+            services.udev.packages = [ self.packages.${pkgs.stdenv.hostPlatform.system}.blaster-x4-control ];
           };
         };
     };
