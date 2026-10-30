@@ -59,40 +59,15 @@
         {
           default = pkgs.blaster-x4-control;
           blaster-x4-control = pkgs.blaster-x4-control;
-          # .deb/.rpm/AppImage packages are built by packaging/build-release.sh
         }
       );
 
       devShells = forEachSupportedSystem (
         { pkgs }:
         {
-          default = pkgs.mkShell {
-            packages = with pkgs; [
-              udev
-              dbus
-              rustToolchain
-              openssl
-              pkg-config
-              cargo-deny
-              cargo-edit
-              cargo-watch
-              rust-analyzer
-              bacon
-              evcxr
-
-              # wayland support
-              wayland
-              libxkbcommon
-              libGL
-              libglvnd
-
-            ];
-
-            env = {
-              # Required by rust-analyzer
-              RUST_SRC_PATH = "${pkgs.rustToolchain}/lib/rustlib/src/rust/library";
-              LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [ pkgs.udev pkgs.dbus pkgs.wayland pkgs.libxkbcommon pkgs.libGL pkgs.libglvnd pkgs.openssl]}";
-            };
+          default = import ./shell.nix {
+            inherit pkgs;
+            rustToolchain = pkgs.rustToolchain;
           };
         }
       );

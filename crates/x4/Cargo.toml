@@ -1,0 +1,17 @@
+[package]
+name = "soundblaster-x4"
+version = "0.1.0"
+edition = "2024"
+description = "Userspace Sound Blaster X4 CDC control protocol and device API"
+license = "MIT"
+repository = "https://github.com/synsejse/linuxblaster_control"
+readme = "README.md"
+
+[dependencies]
+aes-gcm = "0.10"
+getrandom = "0.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serialport = "4.8"
+
+[dev-dependencies]
+serde_json = "1.0.148"

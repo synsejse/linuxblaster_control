@@ -2,9 +2,13 @@
 , rustPlatform
 , pkg-config
 , udev
-, dbus
 , wayland
 , libxkbcommon
+, vulkan-loader
+, libx11
+, libxcursor
+, libxi
+, libxrandr
 , libGL
 , libglvnd
 }:
@@ -19,10 +23,7 @@ rustPlatform.buildRustPackage rec {
     fileset = lib.fileset.unions [
       ../Cargo.toml
       ../Cargo.lock
-      ../src
-      ../examples
-      ../tests
-      ../docs
+      ../crates
       ../packaging
       ../README.md
       ../LICENSE
@@ -41,23 +42,26 @@ rustPlatform.buildRustPackage rec {
     udev
     wayland
     libxkbcommon
+    vulkan-loader
     libGL
     libglvnd
+    libx11 libxcursor libxi libxrandr
   ];
 
   # Runtime library path for dynamic linking
-  # (dbus is loaded at runtime by the file dialog for Load/Save Profile)
   runtimeDependencies = [
     udev
-    dbus
     wayland
     libxkbcommon
+    vulkan-loader
     libGL
     libglvnd
+    libx11 libxcursor libxi libxrandr
   ];
 
   # Captured protocol tests and headless UI checks need no device or display.
   doCheck = true;
+  cargoTestFlags = [ "--workspace" ];
 
   postInstall = ''
     # Install udev rules
@@ -70,13 +74,16 @@ rustPlatform.buildRustPackage rec {
 
     # README and LICENSE
     install -Dm644 ${../README.md} $out/share/doc/${pname}/README.md
-    cp -r ${../docs} $out/share/doc/${pname}/docs
+    install -Dm644 ${../crates/x4/README.md} $out/share/doc/${pname}/api/README.md
+    install -Dm644 ${../crates/x4/docs/PROTOCOL.md} $out/share/doc/${pname}/api/PROTOCOL.md
     install -Dm644 ${../LICENSE} $out/share/licenses/${pname}/LICENSE
+    install -Dm644 ${../crates/app/assets/fonts/inter/LICENSE.txt} $out/share/licenses/${pname}/inter/LICENSE.txt
+    install -Dm644 ${../crates/app/assets/fonts/lucide/LICENSE} $out/share/licenses/${pname}/lucide/LICENSE
   '';
 
   postFixup = ''
     # Add runtime dependencies to the binary
-    patchelf --add-rpath "${lib.makeLibraryPath [ udev dbus wayland libxkbcommon libGL libglvnd ]}" $out/bin/linuxblaster_control
+    patchelf --add-rpath "${lib.makeLibraryPath [ udev wayland libxkbcommon vulkan-loader libGL libglvnd libx11 libxcursor libxi libxrandr ]}" $out/bin/linuxblaster_control
   '';
 
   meta = with lib; {

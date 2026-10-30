@@ -1,117 +1,81 @@
 # Linuxblaster Control — Sound Blaster X4
 
-A Rust/egui controller for the **Creative Sound Blaster X4 / SB1815 (`041e:3278`)**,
-forked from [RizeCrime/linuxblaster_control](https://github.com/RizeCrime/linuxblaster_control).
-The upstream MIT license and Git history are preserved. This branch targets the X4,
-not the G6. The X4 backend is a Rust implementation of the accompanying X4 protocol research.
+A native Linux controller for the **Creative Sound Blaster X4 (`041e:3278`)**.
+Forked from [RizeCrime/linuxblaster_control](https://github.com/RizeCrime/linuxblaster_control),
+which targets the G6. This branch targets the X4 only.
 
-Audio uses Linux's `snd-usb-audio`; proprietary settings use `cdc_acm` through
-`/dev/ttyACM*`. The app never detaches the audio driver or resets the USB device.
-It does not require vendor DLLs, a new kernel driver, Python, or a D-Bus daemon.
-One background worker owns the serial connection, serializes commands and refreshes
-state every three seconds. Disconnects trigger reconnect attempts; failed writes
-are never replayed. Closing the window closes the app.
+![Linuxblaster Control equalizer page](crates/app/screenshot.png)
 
-## Available controls
+Audio keeps working through Linux's standard `snd-usb-audio` driver. The app
+changes device settings over the X4's serial control port (`/dev/ttyACM*`). No
+kernel driver, vendor software or background service is needed.
 
-- Read firmware, capabilities, output, Direct Mode, headphone gain and hardware EQ.
-- Switch speakers/headphones; toggle Direct Mode and headphone gain.
-- Enable/disable EQ and edit preamp plus ten hardware EQ bands.
-- Save/load local EQ presets, tagged for X4 and speaker/headphone output.
-  Loading previews the preset; **Apply EQ** performs the changes.
-- Read stored speaker/headphone device profiles as JSON (`--profiles`).
+## Features
 
-Every setter requires a successful acknowledgement and matching readback. EQ
-application is a sequence of individual changes, not an atomic transaction: a failure
-can leave a partially applied EQ. The app reports this and reconnects to read actual state.
-It never restores presets automatically on reconnect.
+- Speakers/headphones output, Direct Mode and high headphone gain
+- Super X-Fi Off / On / Battle Mode
+- The four onboard EQ slots (Music, Movie, Footsteps Enhancer, SXFI) with names
+  read from the device
+- Hardware EQ: enable, preamp and ten bands, saved to the active slot
+- Playback, monitoring and recording levels, mutes and Microphone Boost
+- JSON output of the full state (`--status`) or all stored EQ curves (`--profiles`)
 
-**Experimental:** recorded research proves the unlock, reads and EQ preamp changes
-on firmware `1.7.250324.0910`. Routing/Direct Mode/gain setters are based on vendor
-protocol analysis; the research did not exercise them on this unit. Live Linux status/profile reads and the native GUI have also passed. Linux cold plug,
-suspend/resume, acoustic behavior and PCM formats still require hardware validation.
-See [protocol details](docs/PROTOCOL.md) and [validation](docs/VALIDATION.md).
+Every change is read back from the device before the UI shows it. If a write
+fails, the app reconnects and shows the actual state; it never retries a write
+automatically. SXFI personalization, SmartComms, Scout Mode and DAC filters are
+not supported.
 
-EQ band frequencies and device limits have not been established. Bands are numbered
-1–10 in the GUI; the application's ±12 dB input bound is conservative, not a queried
-hardware capability. Therefore the upstream G6 AutoEq frequency mapping is not used.
-G6 SBX, lighting, microphone DSP, mixer setters, Scout Mode and DAC filters are not
-exposed. SXFI/personalization, SmartComms and stored-profile writes are unresolved.
-Use ALSA/PipeWire for ordinary volume, recording and sample-rate configuration.
-The G6-specific HID backend, USB reset helpers, capture tools and cold-boot workarounds
-were removed from this branch; they remain available in upstream Git history.
-
-## Build and run
-
-On Linux, install a current Rust toolchain, `pkg-config` and the libudev development
-package (e.g. `libudev-dev` on Debian/Ubuntu). The desktop needs its usual Wayland/X11
-and graphics libraries; the file dialog uses the desktop portal/D-Bus.
-
-```sh
-cargo build --locked --release
-./target/release/linuxblaster_control
-./target/release/linuxblaster_control --status
-./target/release/linuxblaster_control --profiles
-./target/release/linuxblaster_control --port /dev/serial/by-id/usb-Creative_Technology_Ltd_Sound_Blaster_X4_YOUR_SERIAL-if01
-```
-
-Automatic selection requires exactly one X4. `--port` accepts a stable by-id path,
-and verifies its USB identity before opening it. Close the GUI before using a CLI
-query or another controller. Queries may unlock the control channel but do not
-change audio settings. G6 profile JSON and old G6 CLI flags are not compatible.
-
-Install the narrowly scoped desktop access rule, then replug the device:
-
-```sh
-sudo install -m 0644 packaging/70-linuxblaster-control.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-```
-
-The rule grants access to the active local desktop session and tells ModemManager
-to ignore the X4. Headless users need their distribution's serial-device access
-policy, commonly membership in `dialout`. Run the app as your ordinary user.
-
-## NixOS
-
-```sh
-nix develop
-cargo test --locked --all-targets
-cargo run
-# Build the packaged application, without installing or activating anything:
-nix build
-```
-
-The flake exports `packages.<system>.blaster-x4-control` and a NixOS module:
+## Install on NixOS
 
 ```nix
-# Flake input:
+# flake inputs
 inputs.linuxblaster_control.url = "github:synsejse/linuxblaster_control/x4-support";
 
-# In your NixOS modules list:
+# NixOS modules
 linuxblaster_control.nixosModules.default
 { hardware.soundblaster-x4.enable = true; }
 ```
 
-The module installs the app and X4 udev rule. It does not change audio drivers.
-The provided package builds on x86_64-linux and aarch64-linux; only the local
-architecture is covered by the validation report. Release packaging for tar/deb/rpm/
-AppImage is retained but needs separate distribution testing.
+The module installs the app (also available as `linuxblaster`) and a udev rule.
+The rule gives the active desktop session access to the X4 and tells
+ModemManager to ignore it.
+
+## Run
+
+```sh
+linuxblaster_control                 # GUI
+linuxblaster_control --status        # print device state as JSON
+linuxblaster_control --profiles      # print stored EQ curves as JSON
+linuxblaster_control --demo          # offline preview, no device access
+linuxblaster_control --port /dev/serial/by-id/usb-Creative_Technology_Ltd_Sound_Blaster_X4_<serial>-if01
+```
+
+Only one program can control the X4 at a time, so close the GUI before running
+a query. `--port` is needed only when several X4s are connected.
 
 ## Development
 
 ```sh
-cargo fmt --check
-cargo test --locked --all-targets
-cargo clippy --locked --all-targets -- -D warnings
+nix-shell                     # or: nix develop
+cargo run --locked -- --demo
+cargo test --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+nix build                     # package
 ```
 
-- `src/protocol.rs`: framing, unlock and serial transactions.
-- `src/lib.rs`: X4 capabilities, settings, presets and profile decoding.
-- `src/app.rs`: background device worker and native GUI.
-- `src/tests.rs`, `tests/fixtures`: deterministic tests using recorded X4 traffic.
+Without Nix, you need a Rust toolchain, `pkg-config`, libudev headers and the
+usual Wayland/X11 graphics libraries.
 
-No test accesses real hardware. Test fixtures contain selected, unchanged packet bytes from the research folder;
-protocol provenance is recorded in `docs/RESEARCH.md`. Its evidence paths refer to
-the original research bundle, which is not fully duplicated in this fork.
+The workspace has two crates:
 
-![X4 controller showing live device settings](docs/x4.png)
+- [`crates/app`](crates/app/README.md): `linuxblaster_control`, the Iced GUI and CLI.
+- [`crates/x4`](crates/x4/README.md): `soundblaster-x4`, a standalone Rust API for
+  the X4 control protocol. Its [protocol reference](crates/x4/docs/PROTOCOL.md)
+  documents the wire format and device quirks.
+
+Tests never touch hardware. `crates/x4/examples/hardware_check.rs` is an opt-in
+live test that backs up the device settings and restores them afterwards.
+
+## License
+
+MIT, as upstream. See [LICENSE](LICENSE).

@@ -1,0 +1,119 @@
+{
+  "eq": {
+    "bands_db": [
+      6.760000228881836,
+      9.0,
+      7.619999885559082,
+      3.140000104904175,
+      0.9700000286102295,
+      0.28999999165534973,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "enabled": true,
+    "preamp_db": -9.0
+  },
+  "eq_supported": true,
+  "features": 68157504,
+  "firmware": "1.7.250324.0910",
+  "output": "headphone",
+  "reset_features": 0,
+  "supported_features": 70287456,
+  "sxfi": "off",
+  "active_eq_profile": 0,
+  "eq_profiles": [
+    {
+      "index": 0,
+      "name": "Music"
+    },
+    {
+      "index": 1,
+      "name": "Movie"
+    },
+    {
+      "index": 2,
+      "name": "Footsteps Enhancer"
+    },
+    {
+      "index": 3,
+      "name": "SXFI"
+    }
+  ],
+  "mixer": [
+    {
+      "index": 0,
+      "name": "Headphones",
+      "group": "playback",
+      "descriptor": 35266,
+      "has_volume": true,
+      "is_db": true,
+      "range": {
+        "min_db": -80.0,
+        "max_db": 0.0,
+        "step_db": 1.0,
+        "min_raw": -20480,
+        "max_raw": 0,
+        "step_raw": 256
+      },
+      "level_db": -12.0,
+      "raw_level": -3072,
+      "muted": false,
+      "microphone_boost": null
+    },
+    {
+      "index": 1,
+      "name": "Line In",
+      "group": "monitoring",
+      "descriptor": 35266,
+      "has_volume": true,
+      "is_db": true,
+      "range": {
+        "min_db": -80.0,
+        "max_db": 0.0,
+        "step_db": 1.0,
+        "min_raw": -20480,
+        "max_raw": 0,
+        "step_raw": 256
+      },
+      "level_db": -12.0,
+      "raw_level": -3072,
+      "muted": false,
+      "microphone_boost": null
+    },
+    {
+      "index": 2,
+      "name": "Microphone",
+      "group": "recording",
+      "descriptor": 35266,
+      "has_volume": true,
+      "is_db": true,
+      "range": {
+        "min_db": -80.0,
+        "max_db": 0.0,
+        "step_db": 1.0,
+        "min_raw": -20480,
+        "max_raw": 0,
+        "step_raw": 256
+      },
+      "level_db": -12.0,
+      "raw_level": -3072,
+      "muted": false,
+      "microphone_boost": null
+    },
+    {
+      "index": 10,
+      "name": "Microphone Boost",
+      "group": "other",
+      "descriptor": 191,
+      "has_volume": false,
+      "is_db": false,
+      "range": null,
+      "level_db": null,
+      "raw_level": null,
+      "muted": null,
+      "microphone_boost": false
+    }
+  ]
+}
