@@ -368,7 +368,8 @@ impl<T: Read + Write> X4<T> {
         })
     }
     /// Validate advertised outputs (`2c [02]`), SET `2c [00 output:u32le]`,
-    /// then require matching readback.
+    /// then poll readback for three seconds. The firmware ACKs before the route
+    /// changes, and switching to speakers can read back late.
     pub fn set_output(&mut self, output: Output) -> Result<()> {
         let support = self.selector(0x2c, &[2])?;
         if support.len() < 2
@@ -388,10 +389,18 @@ impl<T: Read + Write> X4<T> {
         let mut payload = vec![0];
         payload.extend(output.value().to_le_bytes());
         self.session.set(0x2c, &payload)?;
-        if self.output()? != output {
-            return Err(self.session.mismatch("Output readback mismatch"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if self.output()? == output {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(self
+                    .session
+                    .mismatch("Output readback mismatch after settling"));
+            }
+            std::thread::sleep(Duration::from_millis(40));
         }
-        Ok(())
     }
     /// SET `39 [00 bit enabled]`. Reject unsupported/reset-required features
     /// and poll readback for three seconds.

@@ -36,8 +36,8 @@ the API's deadlines to work.
   worker thread rather than opening the port twice.
 - **Verified writes.** Each high-level setter requires a success ACK and then
   reads the value back, allowing for the firmware's EQ and mixer quantization.
-  Setters that trigger asynchronous changes (feature bits, SXFI, EQ slots) poll
-  until the device settles.
+  Setters that trigger asynchronous changes (output, feature bits, SXFI, EQ
+  slots) poll until the device settles.
 - **Fail closed.** A timeout, malformed reply, rejected write or readback
   mismatch sets `session.usable` to `false`. Later calls fail until you
   reconnect. Read the state again before another write; never replay a write

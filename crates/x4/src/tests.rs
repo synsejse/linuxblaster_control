@@ -20,6 +20,8 @@ fn wire(command: u8, payload: &[u8]) -> Vec<u8> {
 #[derive(Default)]
 struct Fake {
     responses: HashMap<Vec<u8>, Vec<u8>>,
+    /// Replies used once each, in order, before falling back to `responses`.
+    sequences: HashMap<Vec<u8>, VecDeque<Vec<u8>>>,
     rx: VecDeque<u8>,
     writes: Arc<Mutex<Vec<Vec<u8>>>>,
     cold: bool,
@@ -45,7 +47,11 @@ impl Write for Fake {
         if self.cold && bytes == b"SW_MODE1\r\n" {
             self.responses.insert(hex("5a0300"), hex("5a03023b00"));
         }
-        if let Some(response) = self.responses.get(bytes) {
+        if let Some(response) =
+            self.sequences.get_mut(bytes).and_then(VecDeque::pop_front)
+        {
+            self.rx.extend(response);
+        } else if let Some(response) = self.responses.get(bytes) {
             self.rx.extend(response);
         }
         Ok(bytes.len())
@@ -249,6 +255,40 @@ fn feature_change_requires_support_ack_and_matching_readback() {
                 .unwrap()
                 .iter()
                 .filter(|w| **w == wire(0x39, &[0, 5, 1]))
+                .count(),
+            1
+        );
+    }
+}
+#[test]
+fn output_change_polls_until_the_firmware_reports_the_new_route() {
+    // The X4 ACKs the switch first; speaker output reads back late.
+    let headphone = wire(0x2c, &[1, 4, 0, 0, 0]);
+    let speaker = wire(0x2c, &[1, 1, 0, 0, 0]);
+    for (readback, settled, succeeds) in [
+        (vec![headphone.clone(), headphone.clone()], &speaker, true),
+        (vec![], &headphone, false),
+    ] {
+        let mut port = fake(vec![
+            (
+                wire(0x2c, &[2]),
+                wire(0x2c, &[2, 0x82, 1, 0, 0, 0, 4, 0, 0, 0]),
+            ),
+            (wire(0x2c, &[0, 1, 0, 0, 0]), ack(0x2c, 0)),
+            (wire(0x2c, &[1]), settled.clone()),
+        ]);
+        port.sequences.insert(wire(0x2c, &[1]), readback.into());
+        let writes = port.writes.clone();
+        let mut dev = device(port);
+        assert_eq!(dev.set_output(Output::Speaker).is_ok(), succeeds);
+        assert_eq!(dev.session.usable, succeeds);
+        // Waiting must only re-read: the switch itself is never replayed.
+        assert_eq!(
+            writes
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|w| **w == wire(0x2c, &[0, 1, 0, 0, 0]))
                 .count(),
             1
         );

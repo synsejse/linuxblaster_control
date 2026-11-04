@@ -101,7 +101,9 @@ before writing again. Never replay an uncertain write.
 | `39` state | `01 ff ff ff ff` → `01 mask:u32` | `00 bit enabled` |
 
 Output values: speaker `1`, headphone `4`. In the support reply, bit 7 of
-`flags` must be set and its low seven bits count the outputs.
+`flags` must be set and its low seven bits count the outputs. The ACK arrives
+before the route changes, so an immediate readback can still report the old
+output, as seen when switching to speakers. Poll until it matches.
 
 Feature masks are 32-bit. The SET takes a **bit number**, not a mask.
 `Feature` names the established bits:
