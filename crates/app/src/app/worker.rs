@@ -48,6 +48,7 @@ impl EqContext {
 #[derive(Debug, Clone)]
 pub enum Command {
     Refresh,
+    Apply(EqContext, Vec<Command>),
     Output(Output),
     Feature(Feature, bool),
     Sxfi(EqContext, SxfiMode),
@@ -70,6 +71,7 @@ pub enum Completion {
     Refresh,
     Control,
     EqApplied,
+    Applied,
 }
 impl Completion {
     fn of(command: Option<&Command>) -> Self {
@@ -77,6 +79,7 @@ impl Completion {
             None => Self::Poll,
             Some(Command::Refresh) => Self::Refresh,
             Some(Command::Eq(..)) => Self::EqApplied,
+            Some(Command::Apply(..)) => Self::Applied,
             Some(_) => Self::Control,
         }
     }
@@ -147,8 +150,28 @@ fn serve(
         }
         None => device.insert(open(port)?),
     };
+    if let Some(Command::Apply(context, changes)) = command {
+        let mut current = device.state()?;
+        context.check(&current)?;
+        super::draft::validate_changes(&current, changes)
+            .map_err(Error::Invalid)?;
+        for change in changes {
+            EqContext::from_state(&current).check(&device.state()?)?;
+            apply_one(device, Some(&change.rebased(&current)))?;
+            current = device.state()?;
+        }
+        return Ok(current);
+    }
+    apply_one(device, command)?;
+    device.state()
+}
+
+fn apply_one(device: &mut X4<Port>, command: Option<&Command>) -> Result<()> {
     match command {
         None | Some(Command::Refresh) => {}
+        Some(Command::Apply(..)) => {
+            return Err(rejected("Nested Apply is invalid"));
+        }
         Some(Command::Output(output)) => device.set_output(*output)?,
         Some(Command::Feature(feature, enabled)) => {
             device.set_feature(*feature, *enabled)?;
@@ -184,5 +207,5 @@ fn serve(
             device.set_microphone_boost(*enabled)?;
         }
     }
-    device.state()
+    Ok(())
 }

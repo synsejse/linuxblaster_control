@@ -69,7 +69,7 @@ impl X4App {
                     Some("Enabled"),
                     value,
                     self.on_toggle(!self.offline, |v| {
-                        Message::Command(Command::MicrophoneBoost(v))
+                        Message::Edit(Command::MicrophoneBoost(v))
                     }),
                 ),
                 None => Space::new().into(),
@@ -92,7 +92,7 @@ impl X4App {
                 muted,
                 self.press(
                     available,
-                    Message::Command(Command::MixerMute(index, !muted)),
+                    Message::Edit(Command::MixerMute(index, !muted)),
                 ),
             ),
             if !available {
@@ -147,21 +147,6 @@ impl X4App {
         let enabled = !self.offline;
         let value = self.mixer_drafts.get(&index).copied().unwrap_or(actual);
         let changed = (value - actual).abs() > 0.001;
-        // This slot keeps columns aligned: Apply for a pending level, otherwise
-        // the progress of this row's level or mute.
-        let level = Control::MixerLevel(index);
-        let action: Element<'a, Message> = if self.in_flight(level) {
-            t3::primary_small_busy("Apply")
-        } else if changed {
-            t3::primary_small(
-                "Apply",
-                self.press(true, Message::MixerApply(index)),
-            )
-        } else {
-            self.progress(level)
-                .or_else(|| self.progress(Control::MixerMute(index)))
-                .unwrap_or_else(|| Space::new().into())
-        };
         container(
             row![
                 column![
@@ -191,7 +176,6 @@ impl X4App {
                     }
                 ))
                 .align_right(60),
-                container(action).align_right(54),
                 container(trailing).align_right(
                     if control.is_microphone_boost() {
                         96

@@ -62,7 +62,7 @@ impl X4App {
                     state.sxfi == Some(mode),
                     self.press(
                         sxfi_allowed,
-                        Message::Command(Command::Sxfi(context, mode)),
+                        Message::Edit(Command::Sxfi(context, mode)),
                     ),
                 )
             });
@@ -81,7 +81,7 @@ impl X4App {
                     None,
                     state.feature(feature),
                     self.on_toggle(allowed, move |value| {
-                        Message::Command(Command::Feature(feature, value))
+                        Message::Edit(Command::Feature(feature, value))
                     }),
                 ),
             )
@@ -128,8 +128,9 @@ impl X4App {
         &'a self,
         state: &'a State,
     ) -> Element<'a, Message> {
-        let enabled = !state.feature(Feature::DirectMode);
-        let rows = match &self.draft {
+        let enabled =
+            !state.feature(Feature::DirectMode) && !self.context_pending();
+        let mut rows = match &self.draft {
             Some(eq) => {
                 vec![self.bands_view(state, eq), self.preamp_view(eq, enabled)]
             }
@@ -139,6 +140,15 @@ impl X4App {
                 Space::new(),
             )],
         };
+        if self.context_pending() {
+            rows.insert(
+                0,
+                t3::setting_titled(
+                    "Pending device selection",
+                    t3::warning("Apply the selection before editing its EQ."),
+                ),
+            );
+        }
         t3::section(
             match state.active_profile() {
                 Some(profile) => {
@@ -164,7 +174,8 @@ impl X4App {
         state: &State,
         eq: &Equalizer,
     ) -> Element<'_, Message> {
-        let enabled = !state.feature(Feature::DirectMode);
+        let enabled =
+            !state.feature(Feature::DirectMode) && !self.context_pending();
         // These change which curve is on the device, so the one shown is stale.
         let reloading = self.pending.as_ref().is_some_and(|a| {
             matches!(
@@ -254,63 +265,55 @@ impl X4App {
     }
     /// EQ edits are drafts; the bar keeps their state and Apply in view while
     /// the page scrolls.
-    pub(super) fn apply_bar<'a>(
-        &'a self,
-        state: &'a State,
-        eq: &'a Equalizer,
-    ) -> Element<'a, Message> {
-        let saving = self.in_flight(Control::Eq);
-        let saved = self
-            .confirmed
-            .as_ref()
-            .filter(|confirmed| confirmed.control == Control::Eq);
-        let (status, tint) =
-            if let Some(activity) = self.pending.as_ref().filter(|_| saving) {
-                (activity.progress.as_str(), color::MUTED)
-            } else if self.dirty {
-                ("Unapplied changes", color::WARNING)
-            } else if let Some(confirmed) = saved {
-                (confirmed.message.as_str(), color::SUCCESS)
-            } else if self.busy() {
-                ("Waiting for the device", color::MUTED)
-            } else if self.offline {
-                ("Preview · device writes disabled", color::MUTED)
-            } else {
-                ("Synced with your device", color::MUTED)
-            };
-        let marker: Element<'a, Message> = if saving {
-            t3::dots()
-        } else if self.dirty {
-            t3::icon(icon::INFO).size(14).color(tint).into()
-        } else if self.busy() {
-            t3::icon(icon::CLOCK_4).size(14).color(tint).into()
+    pub(super) fn apply_bar(&self) -> Element<'_, Message> {
+        let working = self.in_flight(Control::Apply);
+        let dirty = self.has_changes();
+        let invalid = self.planned_changes().err();
+        let status = if working {
+            "Applying changes…"
+        } else if let Some(error) = invalid.as_deref().filter(|_| dirty) {
+            error
+        } else if dirty {
+            "Unapplied changes"
+        } else if self.offline {
+            "Preview · device writes disabled"
         } else {
-            t3::icon(icon::CIRCLE_CHECK).size(14).color(tint).into()
+            "Synced with your device"
         };
-        let can_apply = !self.busy()
-            && !state.feature(Feature::DirectMode)
-            && !self.offline
-            && self.dirty
-            && eq.validate().is_ok();
+        let tint = if invalid.is_some() && dirty {
+            color::DANGER
+        } else if dirty {
+            color::WARNING
+        } else {
+            color::MUTED
+        };
         t3::composer(
             row![
-                marker,
-                t3::text(status, 13).color(tint).width(iced::Fill),
+                t3::text(status.to_owned(), 13)
+                    .color(tint)
+                    .width(iced::Fill),
                 t3::ghost(
                     icon::UNDO_2,
                     "Revert",
-                    (self.dirty && !self.busy()).then_some(Message::Revert),
+                    (dirty && !self.busy()).then_some(Message::Revert)
                 ),
-                if saving {
-                    t3::primary_busy("Apply EQ")
+                if working {
+                    t3::primary_busy("Apply")
                 } else {
-                    t3::primary("Apply EQ", can_apply.then_some(Message::Apply))
+                    t3::primary(
+                        "Apply",
+                        (dirty
+                            && invalid.is_none()
+                            && !self.busy()
+                            && !self.offline)
+                            .then_some(Message::Apply),
+                    )
                 },
             ]
             .spacing(8)
             .align_y(iced::Center),
             PAGE_WIDTH,
-            self.dirty,
+            dirty,
         )
     }
 }

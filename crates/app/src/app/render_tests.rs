@@ -91,6 +91,8 @@ fn activity(control: Control, progress: &str) -> Activity {
 }
 /// Put `app` into the state the capture `name` shows.
 fn set_scene(app: &mut X4App, name: &str) {
+    app.control_drafts.clear();
+    app.mixer_drafts.clear();
     app.offline = matches!(name, "equalizer" | "mixer");
     app.dirty = name == "pending";
     app.notice = (name == "pending")
@@ -122,6 +124,14 @@ fn set_scene(app: &mut X4App, name: &str) {
     if name == "direct" {
         app.state.as_mut().unwrap().features |= 1 << 5;
     }
+    if name == "device-draft" {
+        app.stage(Command::Output(soundblaster_x4::Output::Speaker));
+    }
+    if name == "mixer-draft" {
+        app.stage(Command::MixerMute(0, true));
+        let _ = app.update(Message::Mixer(0, -20.0));
+    }
+    app.rebuild_preview();
 }
 #[test]
 fn offline_render_and_state_flows() {
@@ -146,6 +156,8 @@ fn offline_render_and_state_flows() {
         (Page::Equalizer, "confirmed"),
         (Page::Equalizer, "saving"),
         (Page::Mixer, "applying"),
+        (Page::Equalizer, "device-draft"),
+        (Page::Mixer, "mixer-draft"),
     ] {
         app.page = page;
         app.state.clone_from(&fixture);
@@ -193,6 +205,7 @@ fn every_box_sits_on_the_pixel_grid_vertically() {
         for connected in [true, false] {
             app.page = page;
             app.state = if connected { fixture.clone() } else { None };
+            app.rebuild_preview();
             for (width, height) in [(1120.0, 900.0), (860.0, 640.0)] {
                 let size = Size::new(width, height);
                 let mut view = app.view();
@@ -245,15 +258,13 @@ fn click_mute(app: &X4App) -> Option<(u8, bool)> {
         }
     }
     messages.into_iter().find_map(|message| match message {
-        Message::Command(Command::MixerMute(index, muted)) => {
-            Some((index, muted))
-        }
+        Message::Edit(Command::MixerMute(index, muted)) => Some((index, muted)),
         _ => None,
     })
 }
 #[test]
-fn mute_icon_asks_for_the_opposite_of_the_confirmed_state() {
-    let (mut app, events, _commands) = tests::app();
+fn mute_icon_toggles_the_draft_without_writing() {
+    let (mut app, events, commands) = tests::app();
     app.page = Page::Mixer;
     for muted in [false, true] {
         let mut state = tests::state();
@@ -263,5 +274,8 @@ fn mute_icon_asks_for_the_opposite_of_the_confirmed_state() {
             .unwrap();
         app.events();
         assert_eq!(click_mute(&app), Some((1, !muted)));
+        let _ = app.update(Message::Edit(Command::MixerMute(1, !muted)));
+        assert_eq!(click_mute(&app), Some((1, muted)));
+        assert!(commands.try_recv().is_err());
     }
 }

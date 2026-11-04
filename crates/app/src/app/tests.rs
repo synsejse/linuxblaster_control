@@ -95,26 +95,26 @@ fn stale_context_rejected_for_mode_profile_output_and_direct_changes() {
     assert!(context.check(&changed).is_err());
 }
 #[test]
-fn poll_preserves_an_active_mixer_edit_then_refreshes_after_release() {
-    let (mut app, events, _) = app();
+fn poll_preserves_mixer_drafts_until_apply_or_revert() {
+    let (mut app, events, commands) = app();
     events
         .send(Event::State(state(), Completion::Refresh))
         .unwrap();
     app.events();
-    app.mixer_drafts.insert(1, -12.0);
-    app.mixer_editing.insert(1);
+    let _ = app.update(Message::Mixer(1, -12.0));
     events
         .send(Event::State(state(), Completion::Poll))
         .unwrap();
     app.events();
     assert_eq!(app.mixer_drafts[&1], -12.0);
-    app.mixer_editing.remove(&1);
-    events
-        .send(Event::State(state(), Completion::Poll))
-        .unwrap();
-    app.events();
-    assert_eq!(app.mixer_drafts[&1], -6.0);
+    assert!(commands.try_recv().is_err());
+    assert!(app.has_changes());
+    let _ = app.update(Message::Revert);
+    assert!(!app.has_changes());
+    assert_eq!(app.state.as_ref().unwrap().mixer[0].level_db, Some(-6.0));
+    assert!(commands.try_recv().is_err());
 }
+
 #[test]
 fn profile_availability_follows_sxfi_and_direct_mode() {
     let mut current = state();
@@ -151,7 +151,7 @@ fn spdif_playback_mute_is_disabled_without_disabling_other_mutes() {
     assert!(!control.mute_available());
 }
 #[test]
-fn boost_waits_for_confirmed_state_and_preserves_eq_draft() {
+fn boost_and_eq_wait_for_apply_and_confirmed_readback() {
     let (mut app, events, commands) = app();
     let mut current = X4App::demo().state.unwrap();
     let boost = current.mixer.iter_mut().find(|c| c.index == 10).unwrap();
@@ -162,10 +162,14 @@ fn boost_waits_for_confirmed_state_and_preserves_eq_draft() {
         .unwrap();
     app.events();
     let _ = app.update(Message::Band(0, 3.0));
-    let _ = app.update(Message::Command(Command::MicrophoneBoost(true)));
+    let _ = app.update(Message::Edit(Command::MicrophoneBoost(true)));
+    assert!(commands.try_recv().is_err());
+    assert!(!app.busy());
+    let _ = app.update(Message::Apply);
     assert!(matches!(
         commands.try_recv().unwrap(),
-        Command::MicrophoneBoost(true)
+        Command::Apply(_, changes) if changes.iter().any(|change| matches!(change, Command::MicrophoneBoost(true)))
+            && changes.iter().any(|change| matches!(change, Command::Eq(..)))
     ));
     assert!(app.busy());
     assert_eq!(
@@ -179,8 +183,9 @@ fn boost_waits_for_confirmed_state_and_preserves_eq_draft() {
         Some(false)
     );
     current.mixer.last_mut().unwrap().microphone_boost = Some(true);
+    current.eq.as_mut().unwrap().bands_db[0] = 3.0;
     events
-        .send(Event::State(current, Completion::Control))
+        .send(Event::State(current, Completion::Applied))
         .unwrap();
     app.events();
     assert!(!app.busy());
@@ -194,7 +199,7 @@ fn boost_waits_for_confirmed_state_and_preserves_eq_draft() {
             .microphone_boost,
         Some(true)
     );
-    assert!(app.dirty);
+    assert!(!app.dirty);
     assert_eq!(app.draft.as_ref().unwrap().bands_db[0], 3.0);
 }
 #[test]
@@ -282,4 +287,123 @@ fn failed_operation_discards_unconfirmed_state() {
     assert!(app.draft.is_none());
     assert!(!app.busy());
     assert!(app.error.is_some());
+}
+
+#[test]
+fn every_device_control_is_a_draft_until_apply() {
+    for change in [
+        Command::Output(Output::Speaker),
+        Command::Feature(Feature::DirectMode, true),
+        Command::Feature(Feature::HeadphoneHighGain, false),
+        Command::Sxfi(EqContext::from_state(&state()), SxfiMode::On),
+        Command::MixerMute(1, true),
+    ] {
+        let (mut app, events, commands) = app();
+        events
+            .send(Event::State(state(), Completion::Refresh))
+            .unwrap();
+        app.events();
+        let _ = app.update(Message::Edit(change));
+        assert!(!app.busy());
+        assert!(commands.try_recv().is_err());
+        assert!(app.has_changes());
+        events
+            .send(Event::State(state(), Completion::Poll))
+            .unwrap();
+        app.events();
+        assert!(app.has_changes(), "poll must preserve drafts");
+        let _ = app.update(Message::Apply);
+        assert!(
+            matches!(commands.try_recv().unwrap(), Command::Apply(_, changes) if changes.len() == 1)
+        );
+        assert!(app.busy());
+    }
+}
+
+#[test]
+fn selecting_the_original_value_or_revert_sends_nothing() {
+    let (mut app, events, commands) = app();
+    events
+        .send(Event::State(state(), Completion::Refresh))
+        .unwrap();
+    app.events();
+    for value in [true, false] {
+        let _ = app.update(Message::Edit(Command::MixerMute(1, value)));
+    }
+    assert!(!app.has_changes());
+    let _ = app.update(Message::Apply);
+    assert!(commands.try_recv().is_err());
+    let _ = app.update(Message::Edit(Command::Output(Output::Speaker)));
+    let _ = app.update(Message::Revert);
+    assert_eq!(app.preview.as_ref().unwrap().output, Output::Headphone);
+    assert!(!app.has_changes());
+    assert!(commands.try_recv().is_err());
+}
+
+#[test]
+fn context_choices_cannot_write_a_curve_from_the_previous_profile() {
+    let (mut app, events, commands) = app();
+    let mut current = state();
+    current.eq_profiles.push(EqProfileInfo {
+        index: 1,
+        name: "Movie".into(),
+    });
+    events
+        .send(Event::State(current.clone(), Completion::Refresh))
+        .unwrap();
+    app.events();
+    let _ = app.update(Message::Band(0, 5.0));
+    let _ = app.update(Message::Edit(Command::Profile(
+        EqContext::from_state(&current),
+        1,
+    )));
+    assert!(!app.dirty);
+    assert!(app.context_pending());
+    let _ = app.update(Message::Band(0, 9.0));
+    assert_eq!(app.draft.as_ref().unwrap().bands_db[0], 0.0);
+    assert!(commands.try_recv().is_err());
+    let _ = app.update(Message::Apply);
+    assert!(matches!(commands.try_recv().unwrap(),
+        Command::Apply(_, changes) if matches!(changes.as_slice(), [Command::Profile(_, 1)])));
+}
+
+#[test]
+fn invalid_changes_block_the_entire_apply() {
+    let (mut app, events, commands) = app();
+    events
+        .send(Event::State(state(), Completion::Refresh))
+        .unwrap();
+    app.events();
+    let _ = app.update(Message::Edit(Command::MixerMute(1, true)));
+    let _ = app.update(Message::Mixer(1, f32::INFINITY));
+    assert!(!app.mixer_drafts[&1].is_infinite());
+    let _ = app.update(Message::Mixer(1, 12.0));
+    let _ = app.update(Message::Apply);
+    assert!(!app.busy());
+    assert!(commands.try_recv().is_err());
+    assert!(app.error.is_some());
+}
+
+#[test]
+fn staged_mode_and_profile_are_validated_in_dependency_order() {
+    let (mut app, events, commands) = app();
+    let mut current = state();
+    current.features |= 1 << Feature::DirectMode.bit();
+    current.eq_profiles.push(EqProfileInfo {
+        index: 3,
+        name: "SXFI".into(),
+    });
+    events
+        .send(Event::State(current.clone(), Completion::Refresh))
+        .unwrap();
+    app.events();
+    let context = EqContext::from_state(&current);
+    let _ =
+        app.update(Message::Edit(Command::Feature(Feature::DirectMode, false)));
+    let _ = app.update(Message::Edit(Command::Sxfi(context, SxfiMode::On)));
+    let _ = app.update(Message::Edit(Command::Profile(context, 3)));
+    let _ = app.update(Message::Apply);
+    assert!(matches!(commands.try_recv().unwrap(),
+        Command::Apply(_, changes) if matches!(changes.as_slice(),
+            [Command::Feature(Feature::DirectMode, false), Command::Sxfi(_, SxfiMode::On), Command::Profile(_, 3)])));
 }

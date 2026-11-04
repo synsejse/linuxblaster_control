@@ -10,6 +10,7 @@ pub const CONFIRMATION: Duration = Duration::from_millis(1600);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control {
     Refresh,
+    Apply,
     Output(Output),
     Feature(Feature),
     Sxfi,
@@ -78,6 +79,11 @@ impl Activity {
                 .map_or("Level", |c| c.name.as_str())
         };
         match command {
+            Command::Apply(..) => Self::new(
+                Control::Apply,
+                "Applying changes…",
+                "Changes applied",
+            ),
             Command::Refresh if state.is_none() => Self::new(
                 Control::Refresh,
                 "Connecting…",

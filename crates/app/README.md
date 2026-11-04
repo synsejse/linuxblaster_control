@@ -23,29 +23,26 @@ nix-shell --run 'ICED_BACKEND=tiny-skia cargo run --locked -- --demo'
 Demo cannot be combined with device arguments. The app installs no background
 service or autostart entry.
 
-The sidebar switches between EQ and mixer and selects the output and onboard EQ
-profile. Output, Direct Mode, gain, SXFI and
-profile buttons show confirmed state while a worker applies and reads back changes.
-EQ bands and preamp are drafts until Apply EQ. Revert restores confirmed values.
-The control being written shows bouncing dots and the title bar names the action;
-a check follows once the X4 confirms it. Other controls ignore input until then.
+The sidebar switches between EQ and mixer and stages the output and onboard EQ
+profile. Every device control is a draft: output, Direct Mode, gain, Super X-Fi,
+profile, EQ, mixer level, mute and Microphone Boost. The docked **Apply** bar is
+available on both pages and sends all pending settings together. **Revert**
+restores confirmed values; background reads and page changes keep pending edits.
+
+The full batch is validated before its first write and stops on failure. Output,
+mode and profile changes can load a new EQ curve, so Apply those selections before
+editing their EQ. Selecting a new context discards the old EQ draft with a notice.
 Direct Mode bypasses processing; SXFI requires headphones. The first three profiles
-require SXFI Off; the fourth requires On or Battle. Switching processing context
-invalidates an old draft. Failed writes clear unconfirmed state, display the error
-and reconnect without replaying the failed operation.
+require SXFI Off; the fourth requires On or Battle.
 
-Mixer sliders prepare a level; Apply appears and sends it. Mute changes apply
-immediately.
-Playback, monitoring and recording retain the API's verified labels and ranges.
-S/PDIF playback mute is unavailable on the researched firmware.
-Microphone Boost in Other controls applies immediately and displays confirmed
-device state. It uses the inverted type-63 flag (raw 0 means enabled), with API
-readback verification; it is separate from ordinary mute and level controls.
+Failed writes clear unconfirmed state, display the error and reconnect without
+replaying the failed operation. Playback, monitoring and recording retain the
+API's per-control limits. SPDIF Out playback mute is unavailable on the researched
+firmware. Microphone Boost uses the inverted type-63 flag (raw 0 means enabled),
+separate from ordinary mute and level controls.
 
-Profile names and active settings come from the X4; the app keeps no presets of
-its own. EQ edits stay in memory until Apply EQ writes them to the selected
-onboard slot. Closing the app discards unapplied edits and leaves device settings
-alone.
+Profile names and active settings come from the X4. The app keeps no presets.
+Closing it discards unapplied edits and leaves device settings alone.
 
 Tab/Shift+Tab navigate controls; Enter/Space activate focused buttons. Numeric EQ
 fields support keyboard editing. Ctrl+R refreshes the device state. The main pane

@@ -54,7 +54,7 @@ impl X4App {
             nav(Page::Mixer, icon::SLIDERS_HORIZONTAL, "Mixer"),
         ]
         .spacing(2);
-        if let Some(state) = &self.state {
+        if let Some(state) = &self.preview {
             body = body.push(Space::new().height(10)).push(t3::sidebar_group(
                 "Output",
                 [
@@ -119,7 +119,7 @@ impl X4App {
                     .unwrap_or_else(|| t3::radio(selected)),
                 selected,
             },
-            self.press(true, Message::Command(Command::Output(output))),
+            self.press(true, Message::Edit(Command::Output(output))),
         )
     }
     fn profile_choice<'a>(
@@ -141,7 +141,7 @@ impl X4App {
             },
             self.press(
                 available,
-                Message::Command(Command::Profile(
+                Message::Edit(Command::Profile(
                     EqContext::from_state(state),
                     profile.index,
                 )),

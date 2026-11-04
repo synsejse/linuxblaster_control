@@ -1,5 +1,6 @@
 //! Application state and message handling.
 mod activity;
+mod draft;
 #[cfg(test)]
 mod render_tests;
 #[cfg(test)]
@@ -47,14 +48,13 @@ pub enum Message {
     Ignored,
     Window(chrome::Action),
     Page(Page),
-    Command(Command),
+    Edit(Command),
     EqEnabled(bool),
     Band(usize, f32),
     Preamp(f32),
     Apply,
     Revert,
     Mixer(u8, f32),
-    MixerApply(u8),
     Key(Key, Modifiers),
 }
 
@@ -63,6 +63,8 @@ pub struct X4App {
     tx: Sender<Command>,
     rx: Receiver<Event>,
     state: Option<State>,
+    preview: Option<State>,
+    control_drafts: Vec<Command>,
     draft: Option<Equalizer>,
     draft_context: Option<EqContext>,
     dirty: bool,
@@ -100,6 +102,8 @@ impl X4App {
             tx,
             rx,
             state: None,
+            preview: None,
+            control_drafts: Vec::new(),
             draft: None,
             draft_context: None,
             dirty: false,
@@ -145,14 +149,29 @@ impl X4App {
         }
     }
     fn on_state(&mut self, state: State, completed: Completion) {
+        let applied = matches!(completed, Completion::Applied);
+        if applied || matches!(completed, Completion::Refresh) {
+            self.control_drafts.clear();
+            self.mixer_editing.clear();
+            self.mixer_drafts.clear();
+        }
         let context = EqContext::from_state(&state);
         let context_changed =
             self.draft_context.is_some_and(|old| old != context);
         let reset = !self.dirty
             || context_changed
-            || matches!(completed, Completion::Refresh | Completion::EqApplied);
-        if context_changed && self.dirty {
-            self.notice = Some("The output, sound mode or profile changed. Unsaved EQ edits were discarded; the current device EQ is shown.".into());
+            || matches!(
+                completed,
+                Completion::Refresh
+                    | Completion::EqApplied
+                    | Completion::Applied
+            );
+        if context_changed
+            && !applied
+            && (self.dirty || !self.control_drafts.is_empty())
+        {
+            self.control_drafts.clear();
+            self.notice = Some("The output, sound mode or profile changed. Pending device and EQ edits were discarded; the current device state is shown.".into());
         }
         if reset {
             self.draft.clone_from(&state.eq);
@@ -167,6 +186,7 @@ impl X4App {
             }
         }
         self.state = Some(state);
+        self.rebuild_preview();
         if !matches!(completed, Completion::Poll)
             && let Some(activity) = self.pending.take()
         {
@@ -180,6 +200,8 @@ impl X4App {
     fn on_error(&mut self, error: String) {
         self.error = Some(error);
         self.state = None;
+        self.preview = None;
+        self.control_drafts.clear();
         self.pending = None;
         self.confirmed = None;
         self.draft = None;
@@ -223,7 +245,7 @@ impl X4App {
                 return self.on_key(&key, modifiers);
             }
             Message::Page(page) => self.page = page,
-            Message::Command(command) => self.send(command),
+            Message::Edit(command) => self.stage(command),
             Message::EqEnabled(value) => self.edit_eq(|eq| eq.enabled = value),
             Message::Band(index, value) => {
                 self.edit_eq(|eq| eq.bands_db[index] = value);
@@ -233,27 +255,12 @@ impl X4App {
                     self.edit_eq(|eq| eq.preamp_db = value);
                 }
             }
-            Message::Apply => {
-                if let (Some(context), Some(eq)) =
-                    (self.draft_context, self.draft.clone())
-                {
-                    self.send(Command::Eq(context, eq));
-                }
-            }
-            Message::Revert => {
-                if let Some(state) = &self.state {
-                    self.draft.clone_from(&state.eq);
-                    self.dirty = false;
-                }
-            }
+            Message::Apply => self.apply(),
+            Message::Revert => self.revert(),
             Message::Mixer(index, value) => {
-                self.mixer_editing.insert(index);
-                self.mixer_drafts.insert(index, value);
-            }
-            Message::MixerApply(index) => {
-                self.mixer_editing.remove(&index);
-                if let Some(value) = self.mixer_drafts.get(&index) {
-                    self.send(Command::MixerLevel(index, *value));
+                if !self.busy() && !self.offline && value.is_finite() {
+                    self.mixer_editing.insert(index);
+                    self.mixer_drafts.insert(index, value);
                 }
             }
         }
@@ -275,6 +282,9 @@ impl X4App {
         }
     }
     fn edit_eq(&mut self, edit: impl FnOnce(&mut Equalizer)) {
+        if self.busy() || self.context_pending() {
+            return;
+        }
         if let Some(eq) = &mut self.draft {
             edit(eq);
             self.dirty = true;

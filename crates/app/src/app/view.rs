@@ -42,7 +42,7 @@ impl X4App {
                 Tone::Warning,
             ));
         }
-        page = match &self.state {
+        page = match &self.preview {
             Some(state) if self.page == Page::Equalizer => {
                 page.push(self.device_view(state)).push(self.eq_view(state))
             }
@@ -68,10 +68,8 @@ impl X4App {
         )
         .height(iced::Fill);
         let mut main = column![self.titlebar(), content];
-        if self.page == Page::Equalizer
-            && let (Some(state), Some(eq)) = (&self.state, &self.draft)
-        {
-            main = main.push(self.apply_bar(state, eq));
+        if self.state.is_some() {
+            main = main.push(self.apply_bar());
         }
         chrome::frame(
             row![self.sidebar(), t3::sidebar_divider(), main],
@@ -130,8 +128,7 @@ impl X4App {
     /// What the app is doing or just finished, in words. EQ writes report in
     /// the action bar instead while it is on screen.
     fn activity_line(&self) -> Option<Element<'_, Message>> {
-        let on_page =
-            |control| control == Control::Eq && self.page == Page::Equalizer;
+        let on_page = |control| control == Control::Apply;
         if let Some(activity) = &self.pending {
             return (!on_page(activity.control)).then(|| {
                 row![t3::dots(), t3::muted(&activity.progress)]
@@ -170,7 +167,7 @@ impl X4App {
                 t3::icon_button(
                     "refresh",
                     icon::REFRESH_CW,
-                    self.press(true, Message::Command(super::Command::Refresh)),
+                    self.press(true, Message::Edit(super::Command::Refresh)),
                 ),
                 "Refresh · Ctrl+R",
                 t3::Position::Bottom,
