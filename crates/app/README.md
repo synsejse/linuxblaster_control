@@ -1,11 +1,10 @@
 # Linuxblaster Control desktop
 
 Native Iced controller for Sound Blaster X4. Uses Iced 0.14.0, iced_aw 0.14.1
-(number inputs) and iced_audio 0.17.1 (preamp), matching the local razerr-rs
-reference. The dark sidebar, inset controls, green accent, Inter typography and
-Lucide icons follow that reference. Vertical EQ faders sit below a band-gain
-curve; pending edits have an amber status bar and a prominent Apply action.
-The backend library remains independent of the GUI.
+(number inputs) and [`iced_t3`](https://github.com/synsejse/iced_t3), which provides the theme,
+widgets and client-side window decorations. Each point of the band-gain curve sits
+above its vertical EQ fader, and a docked bar keeps EQ status and the Apply action
+in view while the page scrolls. The backend library remains independent of the GUI.
 
 From `code/` on NixOS:
 
@@ -21,15 +20,19 @@ nix-shell --run 'ICED_BACKEND=tiny-skia cargo run --locked -- --demo'
 unchanged. Demo cannot be combined with device arguments. No new background
 service, autostart, host configuration or device reset is installed.
 
-The sidebar switches between EQ and mixer. Output, Direct Mode, gain, SXFI and
+The sidebar switches between EQ and mixer and selects the output and onboard EQ
+profile. Output, Direct Mode, gain, SXFI and
 profile buttons show confirmed state while a worker applies and reads back changes.
 EQ bands and preamp are drafts until Apply EQ. Revert restores confirmed values.
+The control being written shows bouncing dots and the title bar names the action;
+a check follows once the X4 confirms it. Other controls ignore input until then.
 Direct Mode bypasses processing; SXFI requires headphones. The first three profiles
 require SXFI Off; the fourth requires On or Battle. Switching processing context
 invalidates an old draft. Failed writes clear unconfirmed state, display the error
 and reconnect without replaying the failed operation.
 
-Mixer sliders prepare a level; Apply sends it. Mute changes apply immediately.
+Mixer sliders prepare a level; Apply appears and sends it. Mute changes apply
+immediately.
 Playback, monitoring and recording retain the API's verified labels and ranges.
 S/PDIF playback mute is unavailable on the researched firmware.
 Microphone Boost in Other controls applies immediately and displays confirmed
@@ -54,6 +57,7 @@ nix-shell --run 'X4_UI_CAPTURE_DIR=/tmp/x4-ui cargo test -p linuxblaster_control
 ```
 
 The rendering harness draws the actual Iced widget tree using tiny-skia at
-1120×900 and 860×640; it needs neither a display server nor a device. The fixture
+1120×900, 860×640 and 860×1240 (the whole page at minimum width); it needs neither
+a display server nor a device. The fixture
 is explicitly illustrative. These tests do not establish hardware behavior or
 compositor integration.

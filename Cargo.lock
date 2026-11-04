@@ -1091,16 +1091,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iced_audio"
-version = "0.17.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34ab384832cd94cf7802db8aca546d6ec2ec8961bda3f2433522eeed57d41af9"
-dependencies = [
- "iced_core",
- "iced_graphics",
-]
-
-[[package]]
 name = "iced_aw"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1238,6 +1228,14 @@ dependencies = [
  "iced_futures",
  "raw-window-handle",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "iced_t3"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "pollster",
 ]
 
 [[package]]
@@ -1527,8 +1525,8 @@ name = "linuxblaster_control"
 version = "0.1.0"
 dependencies = [
  "iced",
- "iced_audio",
  "iced_aw",
+ "iced_t3",
  "image",
  "pollster",
  "serde_json",

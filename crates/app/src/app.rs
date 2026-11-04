@@ -1,18 +1,19 @@
-use crate::style;
-use iced::widget::{
-    Space, button, column, container, row, scrollable, slider, text,
-};
+use iced::widget::{Space, column, container, row, slider};
 use iced::{Element, Subscription, Task};
+use iced_t3::{Tone, chrome, color, font, icon, style, widget as t3};
 use soundblaster_x4::{
-    Equalizer, Feature, Output, State, SxfiMode,
+    EqProfileInfo, Equalizer, Feature, Output, State, SxfiMode,
     mixer::{MixerControl, MixerGroup},
     open,
     protocol::invalid,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::mpsc::{self, Receiver, Sender},
-    time::Duration,
+    sync::{
+        LazyLock,
+        mpsc::{self, Receiver, Sender},
+    },
+    time::{Duration, Instant},
 };
 
 /// EQ belongs to an output and processing/profile context. A UI draft must not
@@ -86,6 +87,29 @@ enum Event {
     State(State, Completion),
     Error(String),
 }
+/// The control a write belongs to, so progress can appear on that control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Control {
+    Refresh,
+    Output(Output),
+    Feature(Feature),
+    Sxfi,
+    Profile(u8),
+    Eq,
+    MixerLevel(u8),
+    MixerMute(u8),
+    MicrophoneBoost,
+}
+/// A command in flight, and what to say about it before and after.
+#[derive(Debug)]
+struct Activity {
+    control: Control,
+    progress: String,
+    done: String,
+}
+/// How long a finished change keeps its check mark.
+const CONFIRMATION: Duration = Duration::from_millis(1600);
+
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub enum Page {
     #[default]
@@ -101,7 +125,8 @@ pub struct X4App {
     draft: Option<Equalizer>,
     draft_context: Option<EqContext>,
     dirty: bool,
-    busy: bool,
+    pending: Option<Activity>,
+    confirmed: Option<(Control, String, Instant)>,
     error: Option<String>,
     notice: Option<String>,
     page: Page,
@@ -215,7 +240,8 @@ impl X4App {
             draft: None,
             draft_context: None,
             dirty: false,
-            busy: false,
+            pending: None,
+            confirmed: None,
             error: None,
             notice: None,
             page: Page::default(),
@@ -228,12 +254,14 @@ impl X4App {
             return;
         }
         // Also guard against several widgets firing in the same frame.
-        if self.busy {
+        if self.busy() {
             return;
         }
+        let activity = self.activity(&command);
         match self.tx.send(command) {
             Ok(()) => {
-                self.busy = true;
+                self.pending = Some(activity);
+                self.confirmed = None;
                 self.error = None;
                 self.notice = None;
             }
@@ -242,6 +270,111 @@ impl X4App {
                     "Device worker stopped. Restart the application.".into(),
                 )
             }
+        }
+    }
+    fn busy(&self) -> bool {
+        self.pending.is_some()
+    }
+    fn in_flight(&self, control: Control) -> bool {
+        self.pending.as_ref().is_some_and(|a| a.control == control)
+    }
+    fn activity(&self, command: &Command) -> Activity {
+        let state = self.state.as_ref();
+        let mixer_name = |index: u8| {
+            state
+                .and_then(|s| s.mixer.iter().find(|c| c.index == index))
+                .map_or("Level", |c| c.name.as_str())
+        };
+        let profile_name = |index: u8| {
+            state
+                .and_then(|s| s.eq_profiles.iter().find(|p| p.index == index))
+                .map_or("Profile", |p| p.name.as_str())
+        };
+        let switch = |on: bool| if on { "on" } else { "off" };
+        let (control, progress, done) = match command {
+            Command::Refresh if state.is_none() => (
+                Control::Refresh,
+                "Connecting…".into(),
+                "Connected to your X4".into(),
+            ),
+            Command::Refresh => (
+                Control::Refresh,
+                "Reading the X4…".into(),
+                "Device state updated".into(),
+            ),
+            Command::Output(output) => {
+                let name = output_name(*output);
+                (
+                    Control::Output(*output),
+                    format!("Switching to {name}…"),
+                    format!("Now on {name}"),
+                )
+            }
+            Command::Feature(feature, on) => {
+                let name = match feature {
+                    Feature::DirectMode => "Direct mode",
+                    Feature::HeadphoneHighGain => "High headphone gain",
+                    _ => "Feature",
+                };
+                (
+                    Control::Feature(*feature),
+                    format!("Turning {name} {}…", switch(*on)),
+                    format!("{name} {}", switch(*on)),
+                )
+            }
+            Command::Sxfi(_, mode) => {
+                let name = sxfi_name(*mode);
+                (
+                    Control::Sxfi,
+                    format!("Setting Super X-Fi to {name}…"),
+                    format!("Super X-Fi set to {name}"),
+                )
+            }
+            Command::Profile(_, index) => {
+                let name = profile_name(*index);
+                (
+                    Control::Profile(*index),
+                    format!("Loading {name}…"),
+                    format!("{name} loaded"),
+                )
+            }
+            Command::Eq(..) => {
+                let name = state
+                    .and_then(active_profile)
+                    .map_or("your X4", |p| p.name.as_str());
+                (
+                    Control::Eq,
+                    format!("Writing EQ to {name}…"),
+                    format!("EQ saved to {name}"),
+                )
+            }
+            Command::MixerLevel(index, db) => {
+                let name = mixer_name(*index);
+                (
+                    Control::MixerLevel(*index),
+                    format!("Setting {name} to {db:.1} dB…"),
+                    format!("{name} set to {db:.1} dB"),
+                )
+            }
+            Command::MixerMute(index, muted) => {
+                let name = mixer_name(*index);
+                let (progress, done) = if *muted {
+                    (format!("Muting {name}…"), format!("{name} muted"))
+                } else {
+                    (format!("Unmuting {name}…"), format!("{name} unmuted"))
+                };
+                (Control::MixerMute(*index), progress, done)
+            }
+            Command::MicrophoneBoost(on) => (
+                Control::MicrophoneBoost,
+                format!("Turning Microphone Boost {}…", switch(*on)),
+                format!("Microphone Boost {}", switch(*on)),
+            ),
+        };
+        Activity {
+            control,
+            progress,
+            done,
         }
     }
     fn events(&mut self) {
@@ -273,14 +406,21 @@ impl X4App {
                         }
                     }
                     self.state = Some(state);
-                    if !matches!(completed, Completion::Poll) {
-                        self.busy = false;
+                    if !matches!(completed, Completion::Poll)
+                        && let Some(activity) = self.pending.take()
+                    {
+                        self.confirmed = Some((
+                            activity.control,
+                            activity.done,
+                            Instant::now(),
+                        ));
                     }
                 }
                 Event::Error(error) => {
                     self.error = Some(error);
                     self.state = None;
-                    self.busy = false;
+                    self.pending = None;
+                    self.confirmed = None;
                     self.draft = None;
                     self.draft_context = None;
                     self.dirty = false;
@@ -295,7 +435,7 @@ impl X4App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soundblaster_x4::{EqProfileInfo, mixer::MixerRange};
+    use soundblaster_x4::mixer::MixerRange;
 
     pub(super) fn state() -> State {
         State {
@@ -459,7 +599,7 @@ mod tests {
             commands.try_recv().unwrap(),
             Command::MicrophoneBoost(true)
         ));
-        assert!(app.busy);
+        assert!(app.busy());
         assert_eq!(
             app.state
                 .as_ref()
@@ -475,7 +615,7 @@ mod tests {
             .send(Event::State(current, Completion::Control))
             .unwrap();
         app.events();
-        assert!(!app.busy);
+        assert!(!app.busy());
         assert_eq!(
             app.state
                 .as_ref()
@@ -490,6 +630,66 @@ mod tests {
         assert_eq!(app.draft.as_ref().unwrap().bands_db[0], 3.0);
     }
     #[test]
+    fn progress_stays_on_its_control_until_the_write_is_confirmed() {
+        let (mut app, events, _commands) = app();
+        events
+            .send(Event::State(state(), Completion::Refresh))
+            .unwrap();
+        app.events();
+        app.confirmed = None;
+        app.send(Command::Output(Output::Speaker));
+        let control = Control::Output(Output::Speaker);
+        assert!(app.in_flight(control));
+        assert!(!app.in_flight(Control::Output(Output::Headphone)));
+        assert_eq!(
+            app.pending.as_ref().unwrap().progress,
+            "Switching to Speakers…"
+        );
+        // A background poll is not the write's confirmation.
+        events
+            .send(Event::State(state(), Completion::Poll))
+            .unwrap();
+        app.events();
+        assert!(app.in_flight(control));
+        assert!(app.confirmed.is_none());
+        events
+            .send(Event::State(state(), Completion::Control))
+            .unwrap();
+        app.events();
+        assert!(!app.busy());
+        let (confirmed, done, _) = app.confirmed.as_ref().unwrap();
+        assert_eq!(*confirmed, control);
+        assert_eq!(done, "Now on Speakers");
+    }
+    #[test]
+    fn confirmation_expires_and_a_failure_never_confirms() {
+        let (mut app, events, _commands) = app();
+        app.confirmed =
+            Some((Control::Sxfi, "Done".into(), Instant::now() - CONFIRMATION));
+        let _ = app.update(Message::Tick);
+        assert!(app.confirmed.is_none());
+        app.send(Command::Refresh);
+        assert!(app.busy());
+        events.send(Event::Error("Read failed".into())).unwrap();
+        app.events();
+        assert!(!app.busy());
+        assert!(app.confirmed.is_none());
+    }
+    #[test]
+    fn controls_ignore_input_during_a_write_without_looking_disabled() {
+        let (mut app, _events, _commands) = app();
+        assert!(matches!(
+            app.press(true, Message::Revert),
+            Some(Message::Revert)
+        ));
+        assert!(app.press(false, Message::Revert).is_none());
+        app.send(Command::Refresh);
+        assert!(matches!(
+            app.press(true, Message::Revert),
+            Some(Message::Tick)
+        ));
+    }
+    #[test]
     fn only_one_command_is_queued_while_busy() {
         let (mut app, _, commands) = app();
         app.send(Command::Refresh);
@@ -502,6 +702,7 @@ mod tests {
 #[derive(Debug, Clone)]
 pub enum Message {
     Tick,
+    Window(chrome::Action),
     Page(Page),
     Command(Command),
     EqEnabled(bool),
@@ -513,110 +714,43 @@ pub enum Message {
     MixerApply(u8),
     Key(iced::keyboard::Key, iced::keyboard::Modifiers),
 }
-fn action(
-    label: impl Into<String>,
-    message: Message,
-    enabled: bool,
-) -> Element<'static, Message> {
-    let label = label.into();
-    let message = enabled.then_some(message);
-    crate::keyboard_button::wrap(
-        label.clone(),
-        button(text(label).font(style::SEMIBOLD).size(12))
-            .padding([9, 13])
-            .style(style::primary)
-            .on_press_maybe(message.clone()),
-        message,
-    )
-}
+/// Width of the page column (T3 Code's `max-w-4xl` less its gutters).
+const PAGE_WIDTH: f32 = 832.0;
+/// Display size of the app icon by the title.
+const ICON_SIZE: u32 = 22;
+/// The app icon, scaled once to double size so it stays sharp on HiDPI screens.
+static APP_ICON: LazyLock<iced::widget::image::Handle> = LazyLock::new(|| {
+    let icon = image::load_from_memory(include_bytes!(
+        "../../../packaging/linuxblaster-control.png"
+    ))
+    .expect("bundled app icon")
+    .into_rgba8();
+    let size = ICON_SIZE * 2;
+    let icon = image::imageops::thumbnail(&icon, size, size);
+    iced::widget::image::Handle::from_rgba(size, size, icon.into_raw())
+});
 
-fn choice(
-    label: impl Into<String>,
-    message: Message,
-    selected: bool,
-    enabled: bool,
-) -> Element<'static, Message> {
-    let label = label.into();
-    let message = enabled.then_some(message);
-    crate::keyboard_button::wrap(
-        label.clone(),
-        button(text(label).font(style::SEMIBOLD).size(12))
-            .padding([9, 13])
-            .style(style::choice(selected))
-            .on_press_maybe(message.clone()),
-        message,
-    )
+fn number_input(
+    _: &iced::Theme,
+    _: iced_aw::style::Status,
+) -> iced_aw::style::number_input::Style {
+    iced_aw::style::number_input::Style {
+        button_background: None,
+        icon_color: color::MUTED,
+    }
 }
-fn icon(glyph: char) -> iced::widget::Text<'static> {
-    text(glyph.to_string()).font(style::ICONS).size(16)
+fn output_name(output: Output) -> &'static str {
+    match output {
+        Output::Speaker => "Speakers",
+        Output::Headphone => "Headphones",
+    }
 }
-fn eyebrow(label: &'static str) -> iced::widget::Text<'static> {
-    text(label)
-        .font(style::SEMIBOLD)
-        .size(10)
-        .color(style::MUTED)
-}
-fn divider<'a>() -> Element<'a, Message> {
-    container(Space::new())
-        .height(1)
-        .width(iced::Fill)
-        .style(style::divider)
-        .into()
-}
-fn secondary(
-    label: &'static str,
-    glyph: char,
-    message: Message,
-    enabled: bool,
-) -> Element<'static, Message> {
-    let message = enabled.then_some(message);
-    crate::keyboard_button::wrap(
-        label,
-        button(
-            row![icon(glyph).size(13), text(label).size(12)]
-                .spacing(7)
-                .align_y(iced::Center),
-        )
-        .padding([9, 12])
-        .style(style::secondary)
-        .on_press_maybe(message.clone()),
-        message,
-    )
-}
-fn toggle(
-    label: &'static str,
-    value: bool,
-    change: impl Fn(bool) -> Message + 'static,
-    enabled: bool,
-) -> Element<'static, Message> {
-    toggle_id(label, label, value, change, enabled)
-}
-fn toggle_id(
-    id: impl Into<iced::advanced::widget::Id>,
-    label: &'static str,
-    value: bool,
-    change: impl Fn(bool) -> Message + 'static,
-    enabled: bool,
-) -> Element<'static, Message> {
-    let message = enabled.then(|| change(!value));
-    crate::keyboard_button::wrap(
-        id,
-        iced::widget::toggler(value)
-            .label(label)
-            .size(17)
-            .text_size(12)
-            .spacing(9)
-            .on_toggle_maybe(enabled.then_some(change)),
-        message,
-    )
-}
-
-fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    container(content)
-        .padding(20)
-        .width(iced::Fill)
-        .style(style::card)
-        .into()
+fn sxfi_name(mode: SxfiMode) -> &'static str {
+    match mode {
+        SxfiMode::Off => "Off",
+        SxfiMode::On => "On",
+        SxfiMode::Battle => "Battle",
+    }
 }
 impl X4App {
     pub fn subscription(&self) -> Subscription<Message> {
@@ -650,7 +784,17 @@ impl X4App {
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Tick => self.events(),
+            Message::Tick => {
+                self.events();
+                if self
+                    .confirmed
+                    .as_ref()
+                    .is_some_and(|(.., at)| at.elapsed() >= CONFIRMATION)
+                {
+                    self.confirmed = None;
+                }
+            }
+            Message::Window(action) => return chrome::perform(action),
             Message::Key(
                 iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab),
                 modifiers,
@@ -716,394 +860,402 @@ impl X4App {
         Task::none()
     }
     pub fn view(&self) -> Element<'_, Message> {
-        let connection = if self.offline {
-            "Demo device"
-        } else if self.state.is_some() {
-            "Connected via USB"
-        } else {
-            "Not connected"
-        };
-        let device_tile = container(
-            row![
-                container(icon('\u{e0f1}').size(22).color(style::ACCENT))
-                    .center_x(40)
-                    .center_y(40)
-                    .style(style::chip),
-                column![
-                    text("Sound Blaster X4").font(style::SEMIBOLD).size(13),
-                    text(connection).size(11).color(style::MUTED)
-                ]
-                .spacing(5),
-            ]
-            .spacing(10)
-            .align_y(iced::Center),
-        )
-        .padding(12)
-        .width(iced::Fill)
-        .style(style::well);
-        let nav = |page, glyph, label| {
-            let message = Message::Page(page);
-            crate::keyboard_button::wrap(
-                label,
-                button(
-                    row![
-                        icon(glyph),
-                        text(label).size(13),
-                        Space::new().width(iced::Fill),
-                        icon('\u{e06f}').size(13)
-                    ]
-                    .spacing(10)
-                    .align_y(iced::Center),
-                )
-                .width(iced::Fill)
-                .padding([11, 12])
-                .style(style::choice(self.page == page))
-                .on_press(message.clone()),
-                Some(message),
-            )
-        };
-        let mut footer = column![
-            divider(),
-            text("SETTINGS ON DEVICE")
-                .size(9)
-                .font(style::SEMIBOLD)
-                .color(style::MUTED),
-            text("Changes stay with your X4.")
-                .size(11)
-                .color(style::MUTED)
-        ]
-        .spacing(10);
-        if let Some(state) = &self.state
-            && !self.offline
-        {
-            footer = footer.push(
-                text(format!("Firmware {}", state.firmware))
-                    .size(10)
-                    .color(style::MUTED),
-            );
-        }
-        let sidebar = container(
-            column![
-                row![
-                    container(
-                        text("X4")
-                            .size(16)
-                            .font(style::SEMIBOLD)
-                            .color(style::ACCENT)
-                    )
-                    .center_x(34)
-                    .center_y(34)
-                    .style(style::chip),
-                    text("Linuxblaster").font(style::SEMIBOLD).size(16)
-                ]
-                .spacing(10)
-                .align_y(iced::Center),
-                Space::new().height(16),
-                text("DEVICE")
-                    .size(10)
-                    .font(style::SEMIBOLD)
-                    .color(style::MUTED),
-                device_tile,
-                Space::new().height(16),
-                text("CONTROLS")
-                    .size(10)
-                    .font(style::SEMIBOLD)
-                    .color(style::MUTED),
-                nav(Page::Equalizer, '\u{e0f1}', "Equalizer"),
-                nav(Page::Mixer, '\u{e154}', "Mixer"),
-                Space::new().height(iced::Fill),
-                footer,
-            ]
-            .spacing(9),
-        )
-        .padding([24, 14])
-        .width(218)
-        .height(iced::Fill)
-        .style(style::sidebar);
-        let (title, subtitle) = match self.page {
-            Page::Equalizer => (
-                "Sound controls",
-                "Shape your sound with the X4’s onboard equalizer.",
-            ),
-            Page::Mixer => (
-                "Mixer",
-                "Balance playback, direct monitoring and recording.",
-            ),
-        };
-        let badge = if self.offline {
-            "OFFLINE DEMO"
-        } else if self.busy {
-            "UPDATING"
-        } else if self.state.is_some() {
-            "LIVE"
-        } else {
-            "DISCONNECTED"
-        };
-        let mut body = column![
-            row![
-                column![
-                    row![
-                        text(title).font(style::SEMIBOLD).size(25),
-                        container(text(badge).size(9).font(style::SEMIBOLD))
-                            .padding([4, 7])
-                            .style(if self.offline || self.state.is_none() {
-                                style::neutral_chip
-                            } else if self.busy {
-                                style::pending
-                            } else {
-                                style::chip
-                            })
-                    ]
-                    .spacing(12)
-                    .align_y(iced::Center),
-                    text(subtitle).size(12).color(style::MUTED)
-                ]
-                .spacing(7),
-                Space::new().width(iced::Fill),
-                secondary(
-                    "Refresh",
-                    '\u{e145}',
-                    Message::Command(Command::Refresh),
-                    !self.busy && !self.offline
-                ),
-            ]
-            .spacing(12)
-            .align_y(iced::Center)
-        ]
-        .spacing(18);
+        let mut page = column![].spacing(24).max_width(PAGE_WIDTH);
         if let Some(error) = &self.error {
-            body = body.push(
-                container(
-                    row![icon('\u{e077}'), text(error).size(12)].spacing(10),
-                )
-                .padding(12)
-                .width(iced::Fill)
-                .style(style::error),
-            );
+            page =
+                page.push(t3::alert(icon::CIRCLE_ALERT, error, Tone::Danger));
         }
         if let Some(notice) = &self.notice {
-            body = body.push(
-                container(
-                    row![icon('\u{e0f9}').size(14), text(notice).size(12)]
-                        .spacing(10),
-                )
-                .padding([10, 12])
-                .width(iced::Fill)
-                .style(style::pending),
-            );
+            page = page.push(t3::alert(
+                icon::TRIANGLE_ALERT,
+                notice,
+                Tone::Warning,
+            ));
         }
-        if let Some(state) = &self.state {
-            if self.page == Page::Equalizer {
-                body = body
-                    .push(self.device_view(state))
-                    .push(self.eq_view(state));
-            } else {
-                body = body.push(self.mixer_view(state));
+        page = match &self.state {
+            Some(state) if self.page == Page::Equalizer => {
+                page.push(self.device_view(state)).push(self.eq_view(state))
             }
-        } else {
-            body = body.push(container(column![
-                container(icon('\u{e37f}').size(32).color(style::MUTED)).center_x(72).center_y(72).style(style::well),
-                text("Connect your Sound Blaster X4").size(21).font(style::SEMIBOLD).align_x(iced::Center),
-                text("Plug in your device and close any other controllers.").size(13).color(style::MUTED).align_x(iced::Center),
-                text("We’ll reconnect automatically. Your settings won’t be replayed.").size(12).color(style::MUTED).align_x(iced::Center),
-            ].spacing(16).align_x(iced::Center)).padding([70,20]).center_x(iced::Fill).style(style::card));
+            Some(state) => page.push(self.mixer_view(state)),
+            None if self.busy() => page.push(t3::empty_state(
+                t3::dots(),
+                "Connecting to your X4",
+                [],
+            )),
+            None => page.push(t3::empty_state(
+                t3::icon_tile(icon::UNPLUG, 36),
+                "Connect your Sound Blaster X4",
+                [
+                    "Plug in your device and close any other controllers.",
+                    "We’ll reconnect automatically.",
+                ],
+            )),
+        };
+        let content = t3::scroll(
+            container(page)
+                .padding(iced::Padding::from([24.0, t3::PAGE_GUTTER]).top(8))
+                .center_x(iced::Fill),
+        )
+        .height(iced::Fill);
+        let mut main = column![self.titlebar(), content];
+        if self.page == Page::Equalizer
+            && let (Some(state), Some(eq)) = (&self.state, &self.draft)
+        {
+            main = main.push(self.apply_bar(state, eq));
         }
-        row![
-            sidebar,
-            scrollable(
-                container(body.max_width(1060))
-                    .padding(24)
-                    .center_x(iced::Fill)
+        chrome::frame(
+            row![self.sidebar(), t3::sidebar_divider(), main],
+            Message::Window,
+        )
+    }
+    /// Controls keep their look during a write; only the one in flight shows
+    /// progress. Everything else ignores input until the device answers.
+    fn press(&self, allowed: bool, message: Message) -> Option<Message> {
+        allowed.then(|| if self.busy() { Message::Tick } else { message })
+    }
+    /// [`Self::press`] for switches.
+    fn on_toggle<F: Fn(bool) -> Message>(
+        &self,
+        allowed: bool,
+        change: F,
+    ) -> Option<impl Fn(bool) -> Message + use<F>> {
+        let busy = self.busy();
+        allowed.then_some(
+            move |value| {
+                if busy { Message::Tick } else { change(value) }
+            },
+        )
+    }
+    /// Dots while `control` is in flight, then a check once the X4 confirms it.
+    fn progress<'a>(&self, control: Control) -> Option<Element<'a, Message>> {
+        if self.in_flight(control) {
+            Some(t3::dots())
+        } else if self
+            .confirmed
+            .as_ref()
+            .is_some_and(|(confirmed, ..)| *confirmed == control)
+        {
+            Some(
+                t3::icon(icon::CIRCLE_CHECK)
+                    .size(14)
+                    .color(color::SUCCESS)
+                    .into(),
             )
-            .height(iced::Fill)
-        ]
-        .into()
+        } else {
+            None
+        }
     }
-    fn device_view(&self, state: &State) -> Element<'_, Message> {
-        let enabled = !self.busy && !self.offline;
-        let context = EqContext::from_state(state);
-        let mut output = row![].spacing(6);
-        for (value, label) in [
-            (Output::Speaker, "Speakers"),
-            (Output::Headphone, "Headphones"),
-        ] {
-            output = output.push(choice(
-                label,
-                Message::Command(Command::Output(value)),
-                state.output == value,
-                enabled,
-            ));
+    /// `content` with the progress of `control` beside it.
+    fn with_progress<'a>(
+        &self,
+        control: Control,
+        content: impl Into<Element<'a, Message>>,
+    ) -> Element<'a, Message> {
+        let mut with_status = row![].spacing(10).align_y(iced::Center);
+        if let Some(progress) = self.progress(control) {
+            with_status = with_status.push(progress);
         }
-        let mut modes = row![].spacing(6);
-        for (value, label) in [
-            (SxfiMode::Off, "Off"),
-            (SxfiMode::On, "On"),
-            (SxfiMode::Battle, "Battle"),
-        ] {
-            modes = modes.push(choice(
-                label,
-                Message::Command(Command::Sxfi(context, value)),
-                state.sxfi == Some(value),
-                enabled
-                    && state.sxfi.is_some()
-                    && state.output == Output::Headphone
-                    && !context.direct,
-            ));
-        }
-        let mut body = column![
-            row![
-                column![eyebrow("OUTPUT"), output]
-                    .spacing(10)
-                    .width(iced::Fill),
-                column![eyebrow("SUPER X-FI"), modes]
-                    .spacing(10)
-                    .width(iced::Fill)
-            ]
-            .spacing(22),
-            divider(),
-            row![
-                toggle(
-                    "Direct mode",
-                    state.feature(Feature::DirectMode),
-                    |v| Message::Command(Command::Feature(
-                        Feature::DirectMode,
-                        v
-                    )),
-                    enabled && state.writable_feature(Feature::DirectMode)
-                ),
-                Space::new().width(iced::Fill),
-                toggle(
-                    "High headphone gain",
-                    state.feature(Feature::HeadphoneHighGain),
-                    |v| {
-                        Message::Command(Command::Feature(
-                            Feature::HeadphoneHighGain,
-                            v,
-                        ))
-                    },
-                    enabled
-                        && state.writable_feature(Feature::HeadphoneHighGain)
-                        && state.output == Output::Headphone
-                )
-            ]
-            .spacing(16)
-            .align_y(iced::Center),
-        ]
-        .spacing(16);
-        if context.direct || state.output == Output::Speaker {
-            body = body.push(
-                text(if context.direct {
-                    "Direct mode bypasses EQ and Super X-Fi."
-                } else {
-                    "Switch to headphones to use Super X-Fi."
-                })
-                .size(12)
-                .color(style::WARNING),
-            );
-        }
-        card(body)
+        with_status.push(content).into()
     }
-    fn eq_view<'a>(&'a self, state: &'a State) -> Element<'a, Message> {
-        let enabled = !self.busy && !state.feature(Feature::DirectMode);
-        let context = EqContext::from_state(state);
-        let mut profiles = row![].spacing(6);
-        for p in &state.eq_profiles {
-            let selected = state.active_eq_profile == Some(p.index);
-            let active =
-                enabled && !self.offline && profile_available(state, p.index);
-            let message = active.then_some(Message::Command(Command::Profile(
-                context, p.index,
-            )));
-            let control = button(
+    fn sidebar(&self) -> Element<'_, Message> {
+        let header = chrome::drag_region(
+            container(
                 row![
-                    text(format!("{:02}", p.index + 1)).size(10).color(
-                        if selected {
-                            style::ACCENT
-                        } else {
-                            style::MUTED
-                        }
-                    ),
-                    text(&p.name).size(12)
+                    iced::widget::image(APP_ICON.clone())
+                        .width(ICON_SIZE)
+                        .height(ICON_SIZE),
+                    Space::new().width(4),
+                    t3::text("Linuxblaster", 14).font(font::SEMIBOLD),
+                    t3::text("Control", 14).color(color::MUTED),
                 ]
-                .spacing(8)
-                .height(iced::Fill)
+                .spacing(5)
                 .align_y(iced::Center),
             )
-            .padding([10, 12])
-            .width(iced::Fill)
-            .height(48)
-            .style(style::choice(selected))
-            .on_press_maybe(message.clone());
-            let control = crate::keyboard_button::wrap(
-                format!("profile-{}", p.index),
-                control,
-                message,
-            );
-            let hint = if self.offline {
-                "Preview only; device writes are disabled."
-            } else if context.direct {
-                "Turn off Direct mode to select a profile."
-            } else if self.busy {
-                "Waiting for the device."
-            } else if !profile_available(state, p.index) {
-                if p.index == 3 {
-                    "Enable Super X-Fi to use this profile."
-                } else {
-                    "Turn off Super X-Fi to use this profile."
-                }
-            } else {
-                "Load this profile from the X4."
-            };
-            profiles = profiles.push(
-                iced::widget::tooltip(
-                    control,
-                    container(text(format!("{} · {hint}", p.name)).size(12))
-                        .padding(10)
-                        .style(style::well),
-                    iced::widget::tooltip::Position::Bottom,
-                )
-                .gap(8),
-            );
-        }
+            .padding([0, 10])
+            .center_y(44)
+            .width(iced::Fill),
+            Message::Window,
+        );
+        let nav = |page, glyph, label| {
+            t3::sidebar_nav(
+                label,
+                glyph,
+                label,
+                self.page == page,
+                Some(Message::Page(page)),
+            )
+        };
         let mut body = column![
-            row![
-                icon('\u{e154}').color(style::ACCENT),
-                column![
-                    text("Equalizer").font(style::SEMIBOLD).size(17),
-                    text("10 bands · profiles stored on your X4")
-                        .size(11)
-                        .color(style::MUTED)
-                ]
-                .spacing(4),
-                Space::new().width(iced::Fill),
-                toggle(
-                    "Enabled",
-                    self.draft.as_ref().is_some_and(|e| e.enabled),
-                    Message::EqEnabled,
-                    enabled && self.draft.is_some()
-                )
-            ]
-            .spacing(12)
-            .align_y(iced::Center),
-            profiles,
+            nav(Page::Equalizer, icon::AUDIO_LINES, "Equalizer"),
+            nav(Page::Mixer, icon::SLIDERS_HORIZONTAL, "Mixer"),
         ]
-        .spacing(14);
-        if let Some(eq) = &self.draft {
-            body = body.push(
-                container(
-                    iced::widget::canvas(crate::curve::Curve(
-                        eq.bands_db,
-                        eq.enabled && !state.feature(Feature::DirectMode),
-                    ))
-                    .width(iced::Fill)
-                    .height(200),
+        .spacing(2);
+        if let Some(state) = &self.state {
+            body = body.push(Space::new().height(10)).push(t3::sidebar_group(
+                "Output",
+                [
+                    self.output_choice(
+                        state,
+                        Output::Headphone,
+                        icon::HEADPHONES,
+                    ),
+                    self.output_choice(state, Output::Speaker, icon::SPEAKER),
+                ],
+            ));
+            if !state.eq_profiles.is_empty() {
+                body =
+                    body.push(Space::new().height(6)).push(t3::sidebar_group(
+                        "EQ profile",
+                        state
+                            .eq_profiles
+                            .iter()
+                            .map(|profile| self.profile_choice(state, profile)),
+                    ));
+            }
+        }
+        let detail = match &self.state {
+            _ if self.offline => "Demo device".to_owned(),
+            Some(state) => format!("Firmware {}", state.firmware),
+            None => "Not connected".to_owned(),
+        };
+        let device = row![
+            t3::icon_tile(icon::RADIO_RECEIVER, 32),
+            column![
+                t3::text("Sound Blaster X4", 13).font(font::MEDIUM),
+                t3::muted(detail).size(11),
+            ]
+            .spacing(2),
+        ]
+        .spacing(10)
+        .align_y(iced::Center);
+        t3::sidebar(
+            header,
+            body,
+            column![t3::divider(), container(device).padding([12, 8])],
+        )
+    }
+    fn output_choice<'a>(
+        &'a self,
+        state: &'a State,
+        output: Output,
+        glyph: char,
+    ) -> Element<'a, Message> {
+        let selected = state.output == output;
+        let control = Control::Output(output);
+        t3::sidebar_choice(
+            output_name(output),
+            Some(glyph),
+            output_name(output),
+            self.progress(control)
+                .unwrap_or_else(|| t3::radio(selected)),
+            selected,
+            self.press(
+                !self.offline,
+                Message::Command(Command::Output(output)),
+            ),
+        )
+    }
+    fn profile_choice<'a>(
+        &'a self,
+        state: &'a State,
+        profile: &'a EqProfileInfo,
+    ) -> Element<'a, Message> {
+        let selected = state.active_eq_profile == Some(profile.index);
+        let available =
+            !self.offline && profile_available(state, profile.index);
+        let choice = t3::sidebar_choice(
+            format!("profile-{}", profile.index),
+            None,
+            profile.name.clone(),
+            self.progress(Control::Profile(profile.index))
+                .unwrap_or_else(|| t3::radio(selected)),
+            selected,
+            self.press(
+                available,
+                Message::Command(Command::Profile(
+                    EqContext::from_state(state),
+                    profile.index,
+                )),
+            ),
+        );
+        // Only an unavailable profile has anything to explain.
+        let hint = if self.offline || available {
+            return choice;
+        } else if state.feature(Feature::DirectMode) {
+            "Turn off Direct mode to select a profile."
+        } else if profile.index == 3 {
+            "Enable Super X-Fi to use this profile."
+        } else {
+            "Turn off Super X-Fi to use this profile."
+        };
+        t3::tooltip(choice, hint, t3::Position::Right)
+    }
+    /// What the app is doing or just finished, in words. EQ writes report in
+    /// the action bar instead while it is on screen.
+    fn activity_line(&self) -> Option<Element<'_, Message>> {
+        let on_page =
+            |control| control == Control::Eq && self.page == Page::Equalizer;
+        if let Some(activity) = &self.pending {
+            return (!on_page(activity.control)).then(|| {
+                row![t3::dots(), t3::muted(&activity.progress)]
+                    .spacing(8)
+                    .align_y(iced::Center)
+                    .into()
+            });
+        }
+        let (control, done, _) = self.confirmed.as_ref()?;
+        (!on_page(*control)).then(|| {
+            row![
+                t3::icon(icon::CIRCLE_CHECK).size(14).color(color::SUCCESS),
+                t3::text(done, 12).color(color::SUCCESS),
+            ]
+            .spacing(6)
+            .align_y(iced::Center)
+            .into()
+        })
+    }
+    fn titlebar(&self) -> Element<'_, Message> {
+        let (glyph, title) = match self.page {
+            Page::Equalizer => (icon::AUDIO_LINES, "Equalizer"),
+            Page::Mixer => (icon::SLIDERS_HORIZONTAL, "Mixer"),
+        };
+        let mut leading =
+            row![t3::breadcrumb(glyph, ["Sound Blaster X4"], title)]
+                .spacing(16)
+                .align_y(iced::Center);
+        if let Some(line) = self.activity_line() {
+            leading = leading.push(line);
+        }
+        let refresh = if self.in_flight(Control::Refresh) {
+            container(t3::spinner()).center_x(26).center_y(26).into()
+        } else {
+            t3::tooltip(
+                t3::icon_button(
+                    "refresh",
+                    icon::REFRESH_CW,
+                    self.press(
+                        !self.offline,
+                        Message::Command(Command::Refresh),
+                    ),
+                ),
+                "Refresh · Ctrl+R",
+                t3::Position::Bottom,
+            )
+        };
+        chrome::bar(leading, Some(refresh), Message::Window)
+    }
+    fn device_view(&self, state: &State) -> Element<'_, Message> {
+        let context = EqContext::from_state(state);
+        let sxfi_allowed = !self.offline
+            && state.sxfi.is_some()
+            && state.output == Output::Headphone
+            && !context.direct;
+        let modes =
+            [SxfiMode::Off, SxfiMode::On, SxfiMode::Battle].map(|mode| {
+                let label = sxfi_name(mode);
+                t3::segment(
+                    label,
+                    label,
+                    state.sxfi == Some(mode),
+                    self.press(
+                        sxfi_allowed,
+                        Message::Command(Command::Sxfi(context, mode)),
+                    ),
                 )
-                .padding([8, 10])
-                .style(style::well),
-            );
-            let mut bands = row![].spacing(6);
+            });
+        let sxfi_detail = if context.direct {
+            t3::warning("Turn off Direct mode to use Super X-Fi.")
+        } else if state.output == Output::Speaker {
+            t3::warning("Switch to headphones to use Super X-Fi.")
+        } else {
+            t3::muted("Spatial audio for headphones.")
+        };
+        let feature_switch = |id, feature, allowed| {
+            self.with_progress(
+                Control::Feature(feature),
+                t3::switch(
+                    id,
+                    None,
+                    state.feature(feature),
+                    self.on_toggle(allowed, move |value| {
+                        Message::Command(Command::Feature(feature, value))
+                    }),
+                ),
+            )
+        };
+        t3::section(
+            t3::section_title("Device"),
+            None,
+            [
+                t3::setting(
+                    "Super X-Fi",
+                    sxfi_detail,
+                    self.with_progress(Control::Sxfi, t3::segmented(modes)),
+                ),
+                t3::setting(
+                    "Direct mode",
+                    if context.direct {
+                        t3::warning("EQ and Super X-Fi are bypassed.")
+                    } else {
+                        t3::muted("Bypass EQ and Super X-Fi.")
+                    },
+                    feature_switch(
+                        "direct-mode",
+                        Feature::DirectMode,
+                        !self.offline
+                            && state.writable_feature(Feature::DirectMode),
+                    ),
+                ),
+                t3::setting(
+                    "High headphone gain",
+                    t3::muted("Available on headphone output."),
+                    feature_switch(
+                        "headphone-gain",
+                        Feature::HeadphoneHighGain,
+                        !self.offline
+                            && state
+                                .writable_feature(Feature::HeadphoneHighGain)
+                            && state.output == Output::Headphone,
+                    ),
+                ),
+            ],
+        )
+    }
+    fn eq_view<'a>(&'a self, state: &'a State) -> Element<'a, Message> {
+        let enabled = !state.feature(Feature::DirectMode);
+        let busy = self.busy();
+        let band = move |index| {
+            move |value| {
+                if enabled && !busy {
+                    Message::Band(index, value)
+                } else {
+                    Message::Tick
+                }
+            }
+        };
+        let preamp = move |value| {
+            if enabled && !busy {
+                Message::Preamp(value)
+            } else {
+                Message::Tick
+            }
+        };
+        // These change which curve is on the device, so the one shown is stale.
+        let reloading = self.pending.as_ref().is_some_and(|a| {
+            matches!(
+                a.control,
+                Control::Profile(_)
+                    | Control::Output(_)
+                    | Control::Sxfi
+                    | Control::Feature(Feature::DirectMode)
+            )
+        });
+        let mut rows = Vec::new();
+        if let Some(eq) = &self.draft {
+            let mut bands = row![];
             for (index, label) in [
-                "31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k",
+                "31 Hz", "62 Hz", "125 Hz", "250 Hz", "500 Hz", "1 kHz",
+                "2 kHz", "4 kHz", "8 kHz", "16 kHz",
             ]
             .iter()
             .enumerate()
@@ -1111,348 +1263,351 @@ impl X4App {
                 let fader = iced::widget::vertical_slider(
                     -12.0..=12.0,
                     eq.bands_db[index],
-                    move |v| {
-                        if enabled {
-                            Message::Band(index, v)
-                        } else {
-                            Message::Tick
-                        }
-                    },
+                    band(index),
                 )
                 .step(0.1)
                 .shift_step(1.0_f32)
                 .default(0.0_f32)
-                .height(80)
-                .width(24)
-                .style(style::fader(enabled));
+                .height(96)
+                .width(18)
+                .style(style::slider(enabled));
                 let value = iced_aw::NumberInput::new(
                     &eq.bands_db[index],
                     -12.0..=12.0,
-                    move |v| Message::Band(index, v),
+                    band(index),
                 )
-                .on_input_maybe(
-                    enabled.then_some(move |v| Message::Band(index, v)),
-                )
+                .on_input_maybe(enabled.then_some(band(index)))
                 .ignore_buttons(true)
                 .ignore_scroll(true)
                 .step(0.1)
                 .width(iced::Fill)
-                .padding([6, 2])
+                .padding([5, 2])
                 .set_size(11)
+                .line_height(t3::line_height(11))
                 .align_x(iced::Center)
-                .font(style::REGULAR)
-                .style(style::number_input)
-                .input_style(style::input);
+                .font(font::REGULAR)
+                .style(number_input)
+                .input_style(style::input_quiet);
+                // No row spacing: the curve centres its points in equal tenths.
                 bands = bands.push(
-                    column![
-                        text(*label).size(11).color(style::MUTED),
-                        fader,
-                        value
-                    ]
-                    .align_x(iced::Center)
-                    .spacing(9)
+                    container(
+                        column![t3::muted(*label).size(11), fader, value]
+                            .align_x(iced::Center)
+                            .spacing(8),
+                    )
+                    .padding([0, 3])
                     .width(iced::Fill),
                 );
             }
-            body = body.push(bands).push(row![
-                text("Frequency · Hz").size(10).color(style::MUTED),
-                Space::new().width(iced::Fill),
-                text("Gain · dB").size(10).color(style::MUTED)
-            ]);
-            let preamp = iced_audio::HSlider::new(
-                iced_audio::NormalParam::new((eq.preamp_db + 12.0) / 24.0, 0.5),
-            )
-            .enabled(enabled)
-            .height(iced::Length::Fixed(8.0))
-            .style(style::AudioSlider)
-            .config(&iced_audio::virtual_slider::Config {
-                wheel_scalar: 0.0,
-                ..Default::default()
-            })
-            .on_gesture(|gesture| {
-                Message::Preamp(
-                    gesture
-                        .new_normal()
-                        .map(|n| n.as_f32() * 24.0 - 12.0)
-                        .unwrap_or(f32::NAN),
+            rows.push(
+                container(
+                    column![
+                        iced::widget::canvas(crate::curve::Curve(
+                            eq.bands_db,
+                            eq.enabled
+                                && !state.feature(Feature::DirectMode)
+                                && !reloading,
+                        ))
+                        .width(iced::Fill)
+                        .height(196),
+                        bands,
+                    ]
+                    .spacing(12),
                 )
-            });
+                .padding([14, 16])
+                .into(),
+            );
             // Hide floating-point readback noise without changing the EQ draft.
             let preamp_display_db = (eq.preamp_db * 100.0).round() / 100.0;
-            body = body.push(divider()).push(
+            rows.push(t3::setting(
+                "Preamp",
+                t3::muted("Overall EQ gain."),
                 row![
-                    column![
-                        text("Preamp").size(13).font(style::SEMIBOLD),
-                        text("Overall EQ gain").size(10).color(style::MUTED)
-                    ]
-                    .spacing(3)
-                    .width(120),
-                    container(preamp).width(iced::Fill),
+                    slider(-12.0..=12.0, eq.preamp_db, preamp)
+                        .step(0.1_f32)
+                        .shift_step(1.0_f32)
+                        .default(0.0_f32)
+                        .width(240)
+                        .height(22)
+                        .style(style::slider(enabled)),
                     iced_aw::NumberInput::new(
                         &preamp_display_db,
                         -12.0..=12.0,
-                        Message::Preamp
+                        preamp
                     )
-                    .on_input_maybe(enabled.then_some(Message::Preamp))
+                    .on_input_maybe(enabled.then_some(preamp))
                     .ignore_buttons(true)
                     .ignore_scroll(true)
                     .step(0.1)
                     .width(64)
                     .set_size(12)
-                    .padding([7, 8])
-                    .style(style::number_input)
+                    .line_height(t3::line_height(12))
+                    .padding([6, 8])
+                    .style(number_input)
                     .input_style(style::input),
-                    text("dB").size(11).color(style::MUTED),
+                    t3::muted("dB"),
                 ]
-                .spacing(14)
+                .spacing(12)
                 .align_y(iced::Center),
-            );
-            let status = if self.busy {
-                "Applying changes…"
-            } else if self.dirty {
-                "Unapplied changes"
-            } else if self.offline {
-                "Preview · device writes disabled"
-            } else {
-                "Synced with your device"
-            };
-            let footer = row![
-                icon(if self.dirty { '\u{e0f9}' } else { '\u{e06c}' })
-                    .size(14)
-                    .color(if self.dirty {
-                        style::WARNING
-                    } else {
-                        style::MUTED
-                    }),
-                text(status).size(11).color(if self.dirty {
-                    style::WARNING
-                } else {
-                    style::MUTED
-                }),
-                Space::new().width(iced::Fill),
-                secondary(
-                    "Revert",
-                    '\u{e148}',
-                    Message::Revert,
-                    self.dirty && !self.busy
-                ),
-                action(
-                    "Apply EQ",
-                    Message::Apply,
-                    enabled
-                        && !self.offline
-                        && self.dirty
-                        && eq.validate().is_ok()
-                )
-            ]
-            .spacing(10)
-            .align_y(iced::Center);
-            body = body.push(
-                container(footer).padding([12, 14]).width(iced::Fill).style(
-                    if self.dirty {
-                        style::pending
-                    } else {
-                        style::well
-                    },
-                ),
-            );
+            ));
         } else {
-            body = body.push(
-                text("EQ is unavailable in the current device state.")
-                    .color(style::MUTED),
-            );
+            rows.push(t3::setting(
+                "Bands",
+                t3::muted("EQ is unavailable in the current device state."),
+                Space::new(),
+            ));
         }
-        card(body)
+        t3::section(
+            match active_profile(state) {
+                Some(profile) => {
+                    t3::section_heading("Equalizer", &profile.name)
+                }
+                None => t3::section_title("Equalizer").into(),
+            },
+            Some(t3::switch(
+                "eq-enabled",
+                Some("Enabled"),
+                self.draft.as_ref().is_some_and(|e| e.enabled),
+                self.on_toggle(
+                    enabled && self.draft.is_some(),
+                    Message::EqEnabled,
+                ),
+            )),
+            rows,
+        )
+    }
+    /// EQ edits are drafts; the bar keeps their state and Apply in view while
+    /// the page scrolls.
+    fn apply_bar<'a>(
+        &'a self,
+        state: &'a State,
+        eq: &'a Equalizer,
+    ) -> Element<'a, Message> {
+        let saving = self.in_flight(Control::Eq);
+        let saved = self
+            .confirmed
+            .as_ref()
+            .filter(|(control, ..)| *control == Control::Eq);
+        let (status, tint) =
+            if let Some(activity) = self.pending.as_ref().filter(|_| saving) {
+                (activity.progress.as_str(), color::MUTED)
+            } else if self.dirty {
+                ("Unapplied changes", color::WARNING)
+            } else if let Some((_, done, _)) = saved {
+                (done.as_str(), color::SUCCESS)
+            } else if self.busy() {
+                ("Waiting for the device", color::MUTED)
+            } else if self.offline {
+                ("Preview · device writes disabled", color::MUTED)
+            } else {
+                ("Synced with your device", color::MUTED)
+            };
+        let marker: Element<'a, Message> = if saving {
+            t3::dots()
+        } else if self.dirty {
+            t3::icon(icon::INFO).size(14).color(tint).into()
+        } else if self.busy() {
+            t3::icon(icon::CLOCK_4).size(14).color(tint).into()
+        } else {
+            t3::icon(icon::CIRCLE_CHECK).size(14).color(tint).into()
+        };
+        let can_apply = !self.busy()
+            && !state.feature(Feature::DirectMode)
+            && !self.offline
+            && self.dirty
+            && eq.validate().is_ok();
+        t3::composer(
+            row![
+                marker,
+                t3::text(status, 13).color(tint).width(iced::Fill),
+                t3::ghost(
+                    icon::UNDO_2,
+                    "Revert",
+                    (self.dirty && !self.busy()).then_some(Message::Revert),
+                ),
+                if saving {
+                    t3::primary_busy("Apply EQ")
+                } else {
+                    t3::primary("Apply EQ", can_apply.then_some(Message::Apply))
+                },
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+            PAGE_WIDTH,
+            self.dirty,
+        )
     }
     fn mixer_view<'a>(&'a self, state: &'a State) -> Element<'a, Message> {
-        let route = if state.output == Output::Headphone {
-            "Headphones"
-        } else {
-            "Speakers"
-        };
-        let mut groups = column![
-            row![
-                container(
-                    row![
-                        icon('\u{e0f1}').size(13),
-                        text(format!("Output · {route}")).size(12)
-                    ]
-                    .spacing(8)
-                )
-                .padding([7, 10])
-                .style(style::chip),
-                Space::new().width(iced::Fill),
-                text("Levels apply on confirmation; mute is immediate.")
-                    .size(11)
-                    .color(style::MUTED)
-            ]
-            .align_y(iced::Center)
-        ]
-        .spacing(16);
-        for (group, title, detail, glyph) in [
-            (
-                MixerGroup::Playback,
-                "Playback",
-                "What you hear",
-                '\u{e0f1}',
-            ),
+        let mut groups = column![].spacing(24);
+        for (group, title, detail) in [
+            (MixerGroup::Playback, "Playback", Some("What you hear")),
             (
                 MixerGroup::Monitoring,
                 "Monitoring",
-                "Inputs heard directly through the X4",
-                '\u{e145}',
+                Some("Inputs heard directly through the X4"),
             ),
             (
                 MixerGroup::Recording,
                 "Recording",
-                "Inputs sent to recording applications",
-                '\u{e154}',
+                Some("Inputs sent to recording applications"),
             ),
-            (
-                MixerGroup::Other,
-                "Other controls",
-                "Additional device controls",
-                '\u{e0f9}',
-            ),
+            (MixerGroup::Other, "Other controls", None),
         ] {
-            let matching: Vec<_> =
-                state.mixer.iter().filter(|c| c.group == group).collect();
-            if matching.is_empty() {
+            let rows: Vec<_> = state
+                .mixer
+                .iter()
+                .filter(|c| c.group == group)
+                .map(|control| self.mixer_row(control))
+                .collect();
+            if rows.is_empty() {
                 continue;
             }
-            let mut controls = column![
-                row![
-                    container(icon(glyph).color(style::ACCENT))
-                        .center_x(36)
-                        .center_y(36)
-                        .style(style::chip),
-                    column![
-                        text(title).font(style::SEMIBOLD).size(16),
-                        text(detail).size(11).color(style::MUTED)
-                    ]
-                    .spacing(3)
-                ]
-                .spacing(12)
-                .align_y(iced::Center)
-            ]
-            .spacing(16);
-            for control in matching {
-                let index = control.index;
-                let boost = control.is_microphone_boost();
-                controls = controls.push(divider());
-                let mut header = row![
-                    text(&control.name).size(13).font(style::SEMIBOLD),
-                    Space::new().width(iced::Fill)
-                ]
-                .align_y(iced::Center);
-                if boost {
-                    if let Some(enabled) = control.microphone_boost {
-                        header = header.push(toggle_id(
-                            "microphone-boost",
-                            "Enabled",
-                            enabled,
-                            |enabled| {
-                                Message::Command(Command::MicrophoneBoost(
-                                    enabled,
-                                ))
-                            },
-                            !self.busy && !self.offline,
-                        ));
-                    }
-                } else if let Some(muted) = control.muted {
-                    if mixer_mute_available(control) {
-                        header = header.push(toggle_id(
-                            format!("mute-{index}"),
-                            "Mute",
-                            muted,
-                            move |v| {
-                                Message::Command(Command::MixerMute(index, v))
-                            },
-                            !self.busy && !self.offline,
-                        ));
-                    } else {
-                        header = header.push(
-                            text("Mute unavailable")
-                                .size(10)
-                                .color(style::MUTED),
-                        );
-                    }
-                }
-                let mut entry = column![header].spacing(10);
-                if let (Some(range), Some(actual)) =
-                    (&control.range, control.level_db)
-                {
-                    let value = self
-                        .mixer_drafts
-                        .get(&index)
-                        .copied()
-                        .unwrap_or(actual);
-                    let enabled = !self.busy && !self.offline;
-                    let changed = (value - actual).abs() > 0.001;
-                    entry = entry.push(
-                        row![
-                            text(format!("{:.0}", range.min_db))
-                                .size(10)
-                                .color(style::MUTED)
-                                .width(28),
-                            slider(
-                                range.min_db..=range.max_db,
-                                value,
-                                move |v| if enabled {
-                                    Message::Mixer(index, v)
-                                } else {
-                                    Message::Tick
-                                }
-                            )
-                            .step(range.step_db.max(0.01))
-                            .height(22)
-                            .style(style::level),
-                            text(format!("{:.0}", range.max_db))
-                                .size(10)
-                                .color(style::MUTED)
-                                .width(22),
-                            container(
-                                text(format!("{value:.1} dB")).size(12).color(
-                                    if changed {
-                                        style::WARNING
-                                    } else {
-                                        style::TEXT
-                                    }
-                                )
-                            )
-                            .center_x(82)
-                            .padding([7, 0])
-                            .style(style::well),
-                            action(
-                                "Apply",
-                                Message::MixerApply(index),
-                                enabled && changed
-                            )
-                        ]
-                        .spacing(12)
-                        .align_y(iced::Center),
-                    );
-                } else {
-                    entry = entry.push(
-                        text(if boost {
-                            if control.microphone_boost.is_some() {
-                                "Applies immediately"
-                            } else {
-                                "Boost state unavailable"
-                            }
-                        } else {
-                            "No adjustable level"
-                        })
-                        .size(11)
-                        .color(style::MUTED),
-                    );
-                }
-                controls = controls.push(entry);
-            }
-            groups = groups.push(card(controls));
+            let heading = match detail {
+                Some(detail) => t3::section_heading(title, detail),
+                None => t3::section_title(title).into(),
+            };
+            groups = groups.push(t3::section(heading, None, rows));
         }
         groups.into()
     }
+    fn mixer_row<'a>(
+        &'a self,
+        control: &'a MixerControl,
+    ) -> Element<'a, Message> {
+        let index = control.index;
+        let boost = control.is_microphone_boost();
+        let enabled = !self.offline;
+        let busy = self.busy();
+        let trailing: Element<'a, Message> = if boost {
+            match control.microphone_boost {
+                Some(value) => t3::switch(
+                    "microphone-boost",
+                    Some("Enabled"),
+                    value,
+                    self.on_toggle(enabled, |v| {
+                        Message::Command(Command::MicrophoneBoost(v))
+                    }),
+                ),
+                None => Space::new().into(),
+            }
+        } else if let Some(muted) = control.muted {
+            let available = mixer_mute_available(control);
+            let name = &control.name;
+            t3::tooltip(
+                t3::icon_toggle(
+                    format!("mute-{index}"),
+                    if muted {
+                        icon::VOLUME_X
+                    } else {
+                        icon::VOLUME_2
+                    },
+                    muted,
+                    self.press(
+                        enabled && available,
+                        Message::Command(Command::MixerMute(index, !muted)),
+                    ),
+                ),
+                if !available {
+                    "Mute unavailable".to_owned()
+                } else if muted {
+                    format!("Unmute {name}")
+                } else {
+                    format!("Mute {name}")
+                },
+                t3::Position::Left,
+            )
+        } else {
+            Space::new().into()
+        };
+        let (Some(range), Some(actual)) = (&control.range, control.level_db)
+        else {
+            let trailing = self.with_progress(
+                if boost {
+                    Control::MicrophoneBoost
+                } else {
+                    Control::MixerMute(index)
+                },
+                trailing,
+            );
+            return if !boost {
+                t3::setting(
+                    &control.name,
+                    t3::muted("No adjustable level"),
+                    trailing,
+                )
+            } else if control.microphone_boost.is_none() {
+                t3::setting(
+                    &control.name,
+                    t3::muted("Boost state unavailable"),
+                    trailing,
+                )
+            } else {
+                t3::setting_titled(&control.name, trailing)
+            };
+        };
+        let value = self.mixer_drafts.get(&index).copied().unwrap_or(actual);
+        let changed = (value - actual).abs() > 0.001;
+        // This slot keeps columns aligned: Apply for a pending level, otherwise
+        // the progress of this row's level or mute.
+        let level = Control::MixerLevel(index);
+        let action: Element<'a, Message> = if self.in_flight(level) {
+            t3::primary_small_busy("Apply")
+        } else if changed {
+            t3::primary_small(
+                "Apply",
+                self.press(enabled, Message::MixerApply(index)),
+            )
+        } else {
+            self.progress(level)
+                .or_else(|| self.progress(Control::MixerMute(index)))
+                .unwrap_or_else(|| Space::new().into())
+        };
+        container(
+            row![
+                column![
+                    t3::text(&control.name, 14).font(font::MEDIUM),
+                    t3::muted(format!(
+                        "{:.0} to {:.0} dB",
+                        range.min_db, range.max_db
+                    ))
+                ]
+                .spacing(2)
+                .width(136),
+                slider(range.min_db..=range.max_db, value, move |v| {
+                    if enabled && !busy {
+                        Message::Mixer(index, v)
+                    } else {
+                        Message::Tick
+                    }
+                })
+                .step(range.step_db.max(0.01))
+                .height(22)
+                .style(style::slider(enabled)),
+                container(t3::text(format!("{value:.1} dB"), 12).color(
+                    if changed {
+                        color::WARNING
+                    } else {
+                        color::FOREGROUND
+                    }
+                ))
+                .align_right(60),
+                container(action).align_right(54),
+                container(trailing).align_right(if boost { 96 } else { 28 }),
+            ]
+            .spacing(12)
+            .align_y(iced::Center),
+        )
+        .padding([12, 16])
+        .width(iced::Fill)
+        .into()
+    }
+}
+
+fn active_profile(state: &State) -> Option<&EqProfileInfo> {
+    state
+        .eq_profiles
+        .iter()
+        .find(|p| state.active_eq_profile == Some(p.index))
 }
 
 #[cfg(test)]
@@ -1469,7 +1624,7 @@ mod iced_tests {
             .write()
             .unwrap()
             .load_font(iced_aw::ICED_AW_FONT_BYTES.into());
-        for bytes in style::FONTS {
+        for bytes in font::ALL {
             iced::advanced::graphics::text::font_system()
                 .write()
                 .unwrap()
@@ -1491,21 +1646,53 @@ mod iced_tests {
             (Page::Equalizer, "pending"),
             (Page::Equalizer, "disconnected"),
             (Page::Equalizer, "direct"),
+            (Page::Equalizer, "loading"),
+            (Page::Equalizer, "confirmed"),
+            (Page::Equalizer, "saving"),
+            (Page::Mixer, "applying"),
         ] {
             app.page = page;
             app.state = fixture.clone();
             app.offline = matches!(name, "equalizer" | "mixer");
             app.dirty = name == "pending";
+            app.notice = (name == "pending")
+                .then(|| "The output, sound mode or profile changed.".into());
+            app.error = None;
+            let activity = |control, progress: &str| Activity {
+                control,
+                progress: progress.into(),
+                done: String::new(),
+            };
+            app.pending = match name {
+                "loading" => {
+                    Some(activity(Control::Profile(1), "Loading Movie…"))
+                }
+                "saving" => Some(activity(Control::Eq, "Writing EQ to Music…")),
+                "applying" => {
+                    app.mixer_drafts.insert(0, -20.0);
+                    let mixer = &mut app.state.as_mut().unwrap().mixer;
+                    mixer[1].muted = Some(true);
+                    Some(activity(
+                        Control::MixerLevel(0),
+                        "Setting Headphones to -20.0 dB…",
+                    ))
+                }
+                _ => None,
+            };
+            app.confirmed = (name == "confirmed").then(|| {
+                (Control::Profile(0), "Music loaded".into(), Instant::now())
+            });
             if name == "disconnected" {
                 app.state = None;
+                app.error = Some("No Sound Blaster X4 found.".into());
             }
             if name == "direct" {
                 app.state.as_mut().unwrap().features |= 1 << 5;
             }
-            for (width, height) in [(1120, 900), (860, 640)] {
+            for (width, height) in [(1120, 900), (860, 640), (860, 1240)] {
                 let mut renderer =
                     pollster::block_on(<iced::Renderer as Headless>::new(
-                        style::REGULAR,
+                        font::REGULAR,
                         14.0.into(),
                         Some("tiny-skia"),
                     ))
@@ -1518,7 +1705,7 @@ mod iced_tests {
                     &renderer,
                     &layout::Limits::new(size, size),
                 );
-                let theme = style::theme(&app);
+                let theme = iced_t3::theme();
                 let mut messages = Vec::new();
                 view.as_widget_mut().update(
                     &mut tree,
@@ -1552,7 +1739,7 @@ mod iced_tests {
                 if let Ok(directory) = std::env::var("X4_UI_CAPTURE_DIR") {
                     std::fs::create_dir_all(&directory).unwrap();
                     image::save_buffer(
-                        format!("{directory}/{name}-{width}.png"),
+                        format!("{directory}/{name}-{width}x{height}.png"),
                         &pixels,
                         width,
                         height,
@@ -1561,6 +1748,119 @@ mod iced_tests {
                     .unwrap();
                 }
             }
+        }
+    }
+    /// Heights of the step buttons `NumberInput` lays out even with
+    /// `ignore_buttons`, which skips drawing them.
+    const HIDDEN_STEPPERS: [f32; 3] = [8.9375, 9.75, 20.5];
+    fn off_grid(layout: Layout<'_>, found: &mut Vec<iced::Rectangle>) {
+        let bounds = layout.bounds();
+        if (bounds.y.fract() != 0.0 || bounds.height.fract() != 0.0)
+            && !HIDDEN_STEPPERS.contains(&bounds.height)
+        {
+            found.push(bounds);
+        }
+        for child in layout.children() {
+            off_grid(child, found);
+        }
+    }
+    /// Iced truncates fractional positions, so one off-grid box puts everything
+    /// inside it out of line.
+    #[test]
+    fn every_box_sits_on_the_pixel_grid_vertically() {
+        for bytes in font::ALL {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes.into());
+        }
+        let renderer = pollster::block_on(<iced::Renderer as Headless>::new(
+            font::REGULAR,
+            14.0.into(),
+            Some("tiny-skia"),
+        ))
+        .expect("software renderer");
+        let mut app = X4App::demo();
+        let fixture = app.state.clone();
+        for page in [Page::Equalizer, Page::Mixer] {
+            for connected in [true, false] {
+                app.page = page;
+                app.state = if connected { fixture.clone() } else { None };
+                for (width, height) in [(1120.0, 900.0), (860.0, 640.0)] {
+                    let size = iced::Size::new(width, height);
+                    let mut view = app.view();
+                    let mut tree = Tree::new(&view);
+                    let node = view.as_widget_mut().layout(
+                        &mut tree,
+                        &renderer,
+                        &layout::Limits::new(size, size),
+                    );
+                    let mut found = Vec::new();
+                    off_grid(Layout::new(&node), &mut found);
+                    assert!(
+                        found.is_empty(),
+                        "{page:?} at {width}x{height}: {found:#?}"
+                    );
+                }
+            }
+        }
+    }
+    /// Clicks down the column of mute icons and returns the first mute sent.
+    fn click_mute(app: &X4App) -> Option<(u8, bool)> {
+        let renderer = pollster::block_on(<iced::Renderer as Headless>::new(
+            font::REGULAR,
+            14.0.into(),
+            Some("tiny-skia"),
+        ))
+        .expect("software renderer");
+        let size = iced::Size::new(1120.0, 900.0);
+        let mut view = app.view();
+        let mut tree = Tree::new(&view);
+        let node = view.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(size, size),
+        );
+        let x = 1120.0 - t3::PAGE_GUTTER - 16.0 - 13.0;
+        let mut messages = Vec::new();
+        for y in (60..400).step_by(6) {
+            let position = iced::Point::new(x, y as f32);
+            for event in [
+                iced::mouse::Event::CursorMoved { position },
+                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            ] {
+                view.as_widget_mut().update(
+                    &mut tree,
+                    &iced::Event::Mouse(event),
+                    Layout::new(&node),
+                    iced::mouse::Cursor::Available(position),
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut iced::advanced::Shell::new(&mut messages),
+                    &iced::Rectangle::with_size(size),
+                );
+            }
+        }
+        messages.into_iter().find_map(|message| match message {
+            Message::Command(Command::MixerMute(index, muted)) => {
+                Some((index, muted))
+            }
+            _ => None,
+        })
+    }
+    #[test]
+    fn mute_icon_asks_for_the_opposite_of_the_confirmed_state() {
+        let (mut app, events, _commands) = tests::app();
+        app.page = Page::Mixer;
+        for muted in [false, true] {
+            let mut state = tests::state();
+            state.mixer[0].muted = Some(muted);
+            events
+                .send(Event::State(state, Completion::Refresh))
+                .unwrap();
+            app.events();
+            assert_eq!(click_mute(&app), Some((1, !muted)));
         }
     }
     #[test]
@@ -1575,7 +1875,7 @@ mod iced_tests {
         app.events();
         assert!(app.state.is_none());
         assert!(app.draft.is_none());
-        assert!(!app.busy);
+        assert!(!app.busy());
         assert!(app.error.is_some());
     }
 }

@@ -1,7 +1,5 @@
 mod app;
 mod curve;
-mod keyboard_button;
-mod style;
 use soundblaster_x4::{Output, open};
 
 const USAGE: &str = "Linuxblaster Control — Sound Blaster X4
@@ -103,22 +101,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         app::X4App::view,
     )
     .title("Linuxblaster Control — X4")
-    .theme(style::theme)
+    .theme(|_: &app::X4App| iced_t3::theme())
     .subscription(app::X4App::subscription)
-    .settings(iced::Settings {
-        default_font: style::REGULAR,
-        default_text_size: 14.0.into(),
-        ..Default::default()
-    })
+    .settings(iced_t3::settings())
     .font(iced_aw::ICED_AW_FONT_BYTES)
-    .font(style::FONTS[0])
-    .font(style::FONTS[1])
-    .font(style::FONTS[2])
     .window(iced::window::Settings {
         size: iced::Size::new(1120.0, 900.0),
         min_size: Some(iced::Size::new(860.0, 640.0)),
         icon: Some(icon),
-        ..Default::default()
+        // Matches the desktop entry, so the taskbar shows the app's icon.
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: "linuxblaster-control".into(),
+            ..Default::default()
+        },
+        ..iced_t3::chrome::window_settings()
     })
     .run()?;
     Ok(())

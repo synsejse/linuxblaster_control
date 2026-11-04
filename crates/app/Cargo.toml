@@ -8,13 +8,13 @@ repository = "https://github.com/synsejse/linuxblaster_control"
 homepage = "https://github.com/synsejse/linuxblaster_control"
 
 [dependencies]
+iced_t3 = { path = "../iced_t3" }
 soundblaster-x4 = { path = "../x4" }
 serde_json = "1.0.148"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
 iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "web-colors", "x11", "wayland", "tokio", "canvas", "image-without-codecs", "advanced"] }
 iced_aw = { version = "=0.14.1", default-features = false, features = ["number_input", "color_picker"] }
-iced_audio = { version = "=0.17.1", default-features = false, features = ["h_slider", "xy_pad"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]

@@ -77,8 +77,8 @@ rustPlatform.buildRustPackage rec {
     install -Dm644 ${../crates/x4/README.md} $out/share/doc/${pname}/api/README.md
     install -Dm644 ${../crates/x4/docs/PROTOCOL.md} $out/share/doc/${pname}/api/PROTOCOL.md
     install -Dm644 ${../LICENSE} $out/share/licenses/${pname}/LICENSE
-    install -Dm644 ${../crates/app/assets/fonts/inter/LICENSE.txt} $out/share/licenses/${pname}/inter/LICENSE.txt
-    install -Dm644 ${../crates/app/assets/fonts/lucide/LICENSE} $out/share/licenses/${pname}/lucide/LICENSE
+    install -Dm644 ${../crates/iced_t3/assets/fonts/inter/LICENSE.txt} $out/share/licenses/${pname}/inter/LICENSE.txt
+    install -Dm644 ${../crates/iced_t3/assets/fonts/lucide/LICENSE} $out/share/licenses/${pname}/lucide/LICENSE
   '';
 
   postFixup = ''

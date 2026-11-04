@@ -29,7 +29,7 @@ not supported.
 
 ```nix
 # flake inputs
-inputs.linuxblaster_control.url = "github:synsejse/linuxblaster_control/x4-support";
+inputs.linuxblaster_control.url = "git+https://github.com/synsejse/linuxblaster_control?ref=x4-support&submodules=1";
 
 # NixOS modules
 linuxblaster_control.nixosModules.default
@@ -56,6 +56,7 @@ a query. `--port` is needed only when several X4s are connected.
 ## Development
 
 ```sh
+git clone --recurse-submodules -b x4-support https://github.com/synsejse/linuxblaster_control
 nix-shell                     # or: nix develop
 cargo run --locked -- --demo
 cargo test --locked --workspace --all-targets
@@ -66,9 +67,12 @@ nix build                     # package
 Without Nix, you need a Rust toolchain, `pkg-config`, libudev headers and the
 usual Wayland/X11 graphics libraries.
 
-The workspace has two crates:
+The workspace has three crates:
 
 - [`crates/app`](crates/app/README.md): `linuxblaster_control`, the Iced GUI and CLI.
+- [`crates/iced_t3`](https://github.com/synsejse/iced_t3): `iced_t3`, a reusable
+  library with T3 Code's design and client-side window decorations for any Iced
+  app. It lives in its own repository and is included as a git submodule.
 - [`crates/x4`](crates/x4/README.md): `soundblaster-x4`, a standalone Rust API for
   the X4 control protocol. Its [protocol reference](crates/x4/docs/PROTOCOL.md)
   documents the wire format and device quirks.
