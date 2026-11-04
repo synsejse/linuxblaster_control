@@ -23,7 +23,8 @@ kernel driver, vendor software or background service is needed.
 All controls edit local drafts. Output, profiles, Super X-Fi, Direct Mode, gain,
 EQ, mixer levels, mutes and boost reach the device only after **Apply**.
 **Revert** discards pending edits, and background reads preserve them. The Apply
-bar appears on both pages and applies all pending settings together.
+bar appears on any page only while edits are pending or being applied, and
+applies all pending settings together.
 
 Output, mode and profile choices can load a different EQ curve. Apply those
 selections before editing their EQ; selecting a new context discards old EQ

@@ -39,6 +39,7 @@ pub enum Page {
     #[default]
     Equalizer,
     Mixer,
+    Device,
 }
 
 #[derive(Debug, Clone)]

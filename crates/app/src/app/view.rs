@@ -1,4 +1,5 @@
 //! The window: chrome, page layout and the helpers every control shares.
+mod device;
 mod equalizer;
 mod mixer;
 mod sidebar;
@@ -43,10 +44,11 @@ impl X4App {
             ));
         }
         page = match &self.preview {
-            Some(state) if self.page == Page::Equalizer => {
-                page.push(self.device_view(state)).push(self.eq_view(state))
-            }
-            Some(state) => page.push(self.mixer_view(state)),
+            Some(state) => match self.page {
+                Page::Equalizer => page.push(self.eq_view(state)),
+                Page::Mixer => page.push(self.mixer_view(state)),
+                Page::Device => page.push(self.device_view(state)),
+            },
             None if self.busy() => page.push(t3::empty_state(
                 t3::dots(),
                 "Connecting to your X4",
@@ -68,8 +70,8 @@ impl X4App {
         )
         .height(iced::Fill);
         let mut main = column![self.titlebar(), content];
-        if self.state.is_some() {
-            main = main.push(self.apply_bar());
+        if let Some(bar) = self.apply_bar() {
+            main = main.push(bar);
         }
         chrome::frame(
             row![self.sidebar(), t3::sidebar_divider(), main],
@@ -125,10 +127,13 @@ impl X4App {
         }
         with_status.push(content).into()
     }
-    /// What the app is doing or just finished, in words. EQ writes report in
-    /// the action bar instead while it is on screen.
+    /// Progress stays in the Apply bar while working; confirmation then
+    /// appears briefly in the titlebar without leaving an empty footer.
     fn activity_line(&self) -> Option<Element<'_, Message>> {
-        let on_page = |control| control == Control::Apply;
+        let on_page = |control| {
+            control == Control::Apply
+                && (self.has_changes() || self.in_flight(Control::Apply))
+        };
         if let Some(activity) = &self.pending {
             return (!on_page(activity.control)).then(|| {
                 row![t3::dots(), t3::muted(&activity.progress)]
@@ -152,6 +157,7 @@ impl X4App {
         let (glyph, title) = match self.page {
             Page::Equalizer => (icon::AUDIO_LINES, "Equalizer"),
             Page::Mixer => (icon::SLIDERS_HORIZONTAL, "Mixer"),
+            Page::Device => (icon::SETTINGS, "Device"),
         };
         let mut leading =
             row![t3::breadcrumb(glyph, ["Sound Blaster X4"], title)]
@@ -174,5 +180,45 @@ impl X4App {
             )
         };
         chrome::bar(leading, Some(refresh), Message::Window)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{
+        tests::{app, state},
+        worker::{Command, Completion, Event},
+    };
+    use soundblaster_x4::Output;
+
+    #[test]
+    fn apply_bar_only_appears_for_pending_changes_and_disappears_after_apply_or_revert()
+     {
+        let (mut app, events, commands) = app();
+        events
+            .send(Event::State(state(), Completion::Refresh))
+            .unwrap();
+        app.events();
+        for page in [Page::Equalizer, Page::Mixer, Page::Device] {
+            app.page = page;
+            assert!(app.apply_bar().is_none(), "{page:?}: clean");
+        }
+        let _ = app.update(Message::Edit(Command::MixerMute(1, true)));
+        assert!(app.apply_bar().is_some());
+        let _ = app.update(Message::Revert);
+        assert!(app.apply_bar().is_none());
+        let _ = app.update(Message::Edit(Command::Output(Output::Speaker)));
+        let _ = app.update(Message::Apply);
+        assert!(matches!(commands.try_recv().unwrap(), Command::Apply(..)));
+        assert!(app.apply_bar().is_some(), "keep progress visible");
+        let mut applied = state();
+        applied.output = Output::Speaker;
+        events
+            .send(Event::State(applied, Completion::Applied))
+            .unwrap();
+        app.events();
+        assert!(app.apply_bar().is_none(), "hide after completion");
+        assert!(app.confirmed.is_some(), "titlebar can still confirm");
     }
 }

@@ -93,7 +93,7 @@ fn activity(control: Control, progress: &str) -> Activity {
 fn set_scene(app: &mut X4App, name: &str) {
     app.control_drafts.clear();
     app.mixer_drafts.clear();
-    app.offline = matches!(name, "equalizer" | "mixer");
+    app.offline = matches!(name, "equalizer" | "mixer" | "device");
     app.dirty = name == "pending";
     app.notice = (name == "pending")
         .then(|| "The output, sound mode or profile changed.".into());
@@ -149,6 +149,7 @@ fn offline_render_and_state_flows() {
     for (page, name) in [
         (Page::Equalizer, "equalizer"),
         (Page::Mixer, "mixer"),
+        (Page::Device, "device"),
         (Page::Equalizer, "pending"),
         (Page::Equalizer, "disconnected"),
         (Page::Equalizer, "direct"),
@@ -156,13 +157,13 @@ fn offline_render_and_state_flows() {
         (Page::Equalizer, "confirmed"),
         (Page::Equalizer, "saving"),
         (Page::Mixer, "applying"),
-        (Page::Equalizer, "device-draft"),
+        (Page::Device, "device-draft"),
         (Page::Mixer, "mixer-draft"),
     ] {
         app.page = page;
         app.state.clone_from(&fixture);
         set_scene(&mut app, name);
-        for (width, height) in [(1120, 900), (860, 640), (860, 1240)] {
+        for (width, height) in [(1120, 780), (820, 560), (820, 1240)] {
             let pixels = screenshot(&app, width, height);
             assert_eq!(pixels.len(), (width * height * 4) as usize);
             if let Ok(directory) = std::env::var("X4_UI_CAPTURE_DIR") {
@@ -201,12 +202,12 @@ fn every_box_sits_on_the_pixel_grid_vertically() {
     let renderer = renderer();
     let mut app = X4App::demo();
     let fixture = app.state.clone();
-    for page in [Page::Equalizer, Page::Mixer] {
+    for page in [Page::Equalizer, Page::Mixer, Page::Device] {
         for connected in [true, false] {
             app.page = page;
             app.state = if connected { fixture.clone() } else { None };
             app.rebuild_preview();
-            for (width, height) in [(1120.0, 900.0), (860.0, 640.0)] {
+            for (width, height) in [(1120.0, 780.0), (820.0, 560.0)] {
                 let size = Size::new(width, height);
                 let mut view = app.view();
                 let mut tree = Tree::new(&view);
@@ -228,7 +229,7 @@ fn every_box_sits_on_the_pixel_grid_vertically() {
 /// Clicks down the column of mute icons and returns the first mute sent.
 fn click_mute(app: &X4App) -> Option<(u8, bool)> {
     let renderer = renderer();
-    let size = Size::new(1120.0, 900.0);
+    let size = Size::new(1120.0, 780.0);
     let mut view = app.view();
     let mut tree = Tree::new(&view);
     let node = view.as_widget_mut().layout(
@@ -278,4 +279,53 @@ fn mute_icon_toggles_the_draft_without_writing() {
         assert_eq!(click_mute(&app), Some((1, muted)));
         assert!(commands.try_recv().is_err());
     }
+}
+
+#[test]
+fn sidebar_only_navigates_and_never_edits_device_settings() {
+    load_fonts();
+    let mut app = X4App::demo();
+    app.offline = false;
+    let renderer = renderer();
+    let size = Size::new(1120.0, 780.0);
+    let mut view = app.view();
+    let mut tree = Tree::new(&view);
+    let node = view.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(size, size),
+    );
+    let mut messages = Vec::new();
+    for y in (48..760).step_by(6) {
+        let cursor = mouse::Cursor::Available(Point::new(100.0, y as f32));
+        for event in [
+            mouse::Event::CursorMoved {
+                position: Point::new(100.0, y as f32),
+            },
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        ] {
+            view.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Mouse(event),
+                Layout::new(&node),
+                cursor,
+                &renderer,
+                &mut clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &Rectangle::with_size(size),
+            );
+        }
+    }
+    assert!(
+        messages
+            .iter()
+            .any(|message| matches!(message, Message::Page(Page::Device)))
+    );
+    assert!(
+        !messages.iter().any(|message| matches!(
+            message,
+            Message::Edit(_) | Message::Apply
+        ))
+    );
 }

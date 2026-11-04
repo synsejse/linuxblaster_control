@@ -23,11 +23,15 @@ nix-shell --run 'ICED_BACKEND=tiny-skia cargo run --locked -- --demo'
 Demo cannot be combined with device arguments. The app installs no background
 service or autostart entry.
 
-The sidebar switches between EQ and mixer and stages the output and onboard EQ
-profile. Every device control is a draft: output, Direct Mode, gain, Super X-Fi,
+The sidebar navigates Equalizer, Mixer and Device. Device groups Output,
+Super X-Fi, Direct Mode and headphone gain into settings rows. The onboard EQ
+profile selector sits above the curve on Equalizer. Every device control is a
+draft: output, Direct Mode, gain, Super X-Fi,
 profile, EQ, mixer level, mute and Microphone Boost. The docked **Apply** bar is
-available on both pages and sends all pending settings together. **Revert**
-restores confirmed values; background reads and page changes keep pending edits.
+visible on any page only while edits are pending or being applied, and sends all
+pending settings together. It disappears after Apply or Revert; a brief titlebar
+message confirms completion. **Revert** restores confirmed values; background
+reads and page changes keep pending edits.
 
 The full batch is validated before its first write and stops on failure. Output,
 mode and profile changes can load a new EQ curve, so Apply those selections before
@@ -45,8 +49,8 @@ Profile names and active settings come from the X4. The app keeps no presets.
 Closing it discards unapplied edits and leaves device settings alone.
 
 Tab/Shift+Tab navigate controls; Enter/Space activate focused buttons. Numeric EQ
-fields support keyboard editing. Ctrl+R refreshes the device state. The main pane
-scrolls vertically at smaller window sizes; all ten EQ bands fit side by side.
+fields support keyboard editing. Ctrl+R refreshes the device state. The window opens at 1120×780, matching razerr-rs, and resizes down to 820×560.
+The main pane scrolls at smaller sizes; all ten EQ bands fit side by side.
 
 Offline validation and optional native software-rendered captures:
 
@@ -56,7 +60,7 @@ nix-shell --run 'X4_UI_CAPTURE_DIR=/tmp/x4-ui cargo test -p linuxblaster_control
 ```
 
 The rendering harness draws the actual Iced widget tree using tiny-skia at
-1120×900, 860×640 and 860×1240 (the whole page at minimum width); it needs neither
+1120×780, 820×560 and 820×1240 (the whole page at minimum width); it needs neither
 a display server nor a device. The fixture
 is explicitly illustrative. These tests do not establish hardware behavior or
 compositor integration.

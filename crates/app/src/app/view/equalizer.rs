@@ -3,7 +3,7 @@ use super::{PAGE_WIDTH, gated};
 use crate::{
     app::{
         Message, X4App,
-        activity::{Control, sxfi_name},
+        activity::Control,
         worker::{Command, EqContext},
     },
     curve::Curve,
@@ -14,9 +14,7 @@ use iced::{
 };
 use iced_aw::NumberInput;
 use iced_t3::{color, font, icon, style, widget as t3};
-use soundblaster_x4::{
-    EQ_LIMIT_DB, Equalizer, Feature, Output, State, SxfiMode,
-};
+use soundblaster_x4::{EQ_LIMIT_DB, EqProfileInfo, Equalizer, Feature, State};
 
 const EQ_RANGE: std::ops::RangeInclusive<f32> = -EQ_LIMIT_DB..=EQ_LIMIT_DB;
 const BANDS: [&str; 10] = [
@@ -48,82 +46,6 @@ fn gain_input<'a>(
 }
 
 impl X4App {
-    pub(super) fn device_view(&self, state: &State) -> Element<'_, Message> {
-        let context = EqContext::from_state(state);
-        let sxfi_allowed = state.sxfi.is_some()
-            && state.output == Output::Headphone
-            && !context.direct;
-        let modes =
-            [SxfiMode::Off, SxfiMode::On, SxfiMode::Battle].map(|mode| {
-                let label = sxfi_name(mode);
-                t3::segment(
-                    label,
-                    label,
-                    state.sxfi == Some(mode),
-                    self.press(
-                        sxfi_allowed,
-                        Message::Edit(Command::Sxfi(context, mode)),
-                    ),
-                )
-            });
-        let sxfi_detail = if context.direct {
-            t3::warning("Turn off Direct mode to use Super X-Fi.")
-        } else if state.output == Output::Speaker {
-            t3::warning("Switch to headphones to use Super X-Fi.")
-        } else {
-            t3::muted("Spatial audio for headphones.")
-        };
-        let feature_switch = |id, feature, allowed| {
-            self.with_progress(
-                Control::Feature(feature),
-                t3::switch(
-                    id,
-                    None,
-                    state.feature(feature),
-                    self.on_toggle(allowed, move |value| {
-                        Message::Edit(Command::Feature(feature, value))
-                    }),
-                ),
-            )
-        };
-        t3::section(
-            t3::section_title("Device"),
-            None,
-            [
-                t3::setting(
-                    "Super X-Fi",
-                    sxfi_detail,
-                    self.with_progress(Control::Sxfi, t3::segmented(modes)),
-                ),
-                t3::setting(
-                    "Direct mode",
-                    if context.direct {
-                        t3::warning("EQ and Super X-Fi are bypassed.")
-                    } else {
-                        t3::muted("Bypass EQ and Super X-Fi.")
-                    },
-                    feature_switch(
-                        "direct-mode",
-                        Feature::DirectMode,
-                        !self.offline
-                            && state.writable_feature(Feature::DirectMode),
-                    ),
-                ),
-                t3::setting(
-                    "High headphone gain",
-                    t3::muted("Available on headphone output."),
-                    feature_switch(
-                        "headphone-gain",
-                        Feature::HeadphoneHighGain,
-                        !self.offline
-                            && state
-                                .writable_feature(Feature::HeadphoneHighGain)
-                            && state.output == Output::Headphone,
-                    ),
-                ),
-            ],
-        )
-    }
     pub(super) fn eq_view<'a>(
         &'a self,
         state: &'a State,
@@ -140,6 +62,20 @@ impl X4App {
                 Space::new(),
             )],
         };
+        if !state.eq_profiles.is_empty() {
+            rows.insert(
+                0,
+                t3::setting_titled(
+                    "Profile",
+                    t3::segmented(
+                        state
+                            .eq_profiles
+                            .iter()
+                            .map(|profile| self.profile_choice(state, profile)),
+                    ),
+                ),
+            );
+        }
         if self.context_pending() {
             rows.insert(
                 0,
@@ -168,6 +104,36 @@ impl X4App {
             rows,
         )
     }
+    fn profile_choice<'a>(
+        &'a self,
+        state: &'a State,
+        profile: &'a EqProfileInfo,
+    ) -> Element<'a, Message> {
+        let available = state.eq_profile_available(profile.index);
+        let choice = t3::segment(
+            format!("profile-{}", profile.index),
+            profile.name.clone(),
+            state.active_eq_profile == Some(profile.index),
+            self.press(
+                available,
+                Message::Edit(Command::Profile(
+                    EqContext::from_state(state),
+                    profile.index,
+                )),
+            ),
+        );
+        let hint = if self.offline || available {
+            return choice;
+        } else if state.feature(Feature::DirectMode) {
+            "Turn off Direct mode to select a profile."
+        } else if profile.index == 3 {
+            "Enable Super X-Fi to use this profile."
+        } else {
+            "Turn off Super X-Fi to use this profile."
+        };
+        t3::tooltip(choice, hint, t3::Position::Bottom)
+    }
+
     /// The curve above its ten faders.
     fn bands_view(
         &self,
@@ -198,7 +164,8 @@ impl X4App {
                 .height(96)
                 .width(18)
                 .style(style::slider(enabled));
-            let value = gain_input(gain, band, enabled)
+            let display_db = (gain * 100.0).round() / 100.0;
+            let value = gain_input(display_db, band, enabled)
                 .width(iced::Fill)
                 .padding([5, 2])
                 .set_size(11)
@@ -263,22 +230,23 @@ impl X4App {
             .align_y(iced::Center),
         )
     }
-    /// EQ edits are drafts; the bar keeps their state and Apply in view while
-    /// the page scrolls.
-    pub(super) fn apply_bar(&self) -> Element<'_, Message> {
+    /// Only pending edits and an active Apply need a docked bar.
+    pub(super) fn apply_bar(&self) -> Option<Element<'_, Message>> {
+        if self.state.is_none()
+            || (!self.has_changes() && !self.in_flight(Control::Apply))
+        {
+            return None;
+        }
         let working = self.in_flight(Control::Apply);
         let dirty = self.has_changes();
         let invalid = self.planned_changes().err();
         let status = if working {
             "Applying changes…"
-        } else if let Some(error) = invalid.as_deref().filter(|_| dirty) {
-            error
-        } else if dirty {
-            "Unapplied changes"
-        } else if self.offline {
-            "Preview · device writes disabled"
         } else {
-            "Synced with your device"
+            invalid
+                .as_deref()
+                .filter(|_| dirty)
+                .unwrap_or("Unapplied changes")
         };
         let tint = if invalid.is_some() && dirty {
             color::DANGER
@@ -287,7 +255,7 @@ impl X4App {
         } else {
             color::MUTED
         };
-        t3::composer(
+        Some(t3::composer(
             row![
                 t3::text(status.to_owned(), 13)
                     .color(tint)
@@ -314,6 +282,6 @@ impl X4App {
             .align_y(iced::Center),
             PAGE_WIDTH,
             dirty,
-        )
+        ))
     }
 }

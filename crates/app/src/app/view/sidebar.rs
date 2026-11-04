@@ -1,16 +1,10 @@
-//! Navigation, the output and EQ profile pickers, and the device footer.
-use crate::app::{
-    Message, Page, X4App,
-    activity::{Control, output_name},
-    icon as app_icon,
-    worker::{Command, EqContext},
-};
+//! Page navigation and the device footer.
+use crate::app::{Message, Page, X4App, icon as app_icon};
 use iced::{
     Element,
     widget::{Space, column, container, image, row},
 };
 use iced_t3::{chrome, color, font, icon, widget as t3};
-use soundblaster_x4::{EqProfileInfo, Feature, Output, State};
 use std::sync::LazyLock;
 
 /// Display size of the app icon by the title.
@@ -49,34 +43,12 @@ impl X4App {
                 Some(Message::Page(page)),
             )
         };
-        let mut body = column![
+        let body = column![
             nav(Page::Equalizer, icon::AUDIO_LINES, "Equalizer"),
             nav(Page::Mixer, icon::SLIDERS_HORIZONTAL, "Mixer"),
+            nav(Page::Device, icon::SETTINGS, "Device"),
         ]
         .spacing(2);
-        if let Some(state) = &self.preview {
-            body = body.push(Space::new().height(10)).push(t3::sidebar_group(
-                "Output",
-                [
-                    self.output_choice(
-                        state,
-                        Output::Headphone,
-                        icon::HEADPHONES,
-                    ),
-                    self.output_choice(state, Output::Speaker, icon::SPEAKER),
-                ],
-            ));
-            if !state.eq_profiles.is_empty() {
-                body =
-                    body.push(Space::new().height(6)).push(t3::sidebar_group(
-                        "EQ profile",
-                        state
-                            .eq_profiles
-                            .iter()
-                            .map(|profile| self.profile_choice(state, profile)),
-                    ));
-            }
-        }
         let detail = match &self.state {
             _ if self.offline => "Demo device".to_owned(),
             Some(state) => format!("Firmware {}", state.firmware),
@@ -100,63 +72,5 @@ impl X4App {
             body,
             column![t3::divider(), container(device).padding([6, 0])],
         )
-    }
-    fn output_choice<'a>(
-        &'a self,
-        state: &'a State,
-        output: Output,
-        glyph: char,
-    ) -> Element<'a, Message> {
-        let selected = state.output == output;
-        let control = Control::Output(output);
-        t3::sidebar_choice(
-            output_name(output),
-            t3::SidebarChoice {
-                glyph: Some(glyph),
-                label: output_name(output).into(),
-                marker: self
-                    .progress(control)
-                    .unwrap_or_else(|| t3::radio(selected)),
-                selected,
-            },
-            self.press(true, Message::Edit(Command::Output(output))),
-        )
-    }
-    fn profile_choice<'a>(
-        &'a self,
-        state: &'a State,
-        profile: &'a EqProfileInfo,
-    ) -> Element<'a, Message> {
-        let selected = state.active_eq_profile == Some(profile.index);
-        let available = state.eq_profile_available(profile.index);
-        let choice = t3::sidebar_choice(
-            format!("profile-{}", profile.index),
-            t3::SidebarChoice {
-                glyph: None,
-                label: profile.name.as_str().into(),
-                marker: self
-                    .progress(Control::Profile(profile.index))
-                    .unwrap_or_else(|| t3::radio(selected)),
-                selected,
-            },
-            self.press(
-                available,
-                Message::Edit(Command::Profile(
-                    EqContext::from_state(state),
-                    profile.index,
-                )),
-            ),
-        );
-        // Only an unavailable profile has anything to explain.
-        let hint = if self.offline || available {
-            return choice;
-        } else if state.feature(Feature::DirectMode) {
-            "Turn off Direct mode to select a profile."
-        } else if profile.index == 3 {
-            "Enable Super X-Fi to use this profile."
-        } else {
-            "Turn off Super X-Fi to use this profile."
-        };
-        t3::tooltip(choice, hint, t3::Position::Right)
     }
 }

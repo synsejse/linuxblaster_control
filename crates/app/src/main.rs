@@ -100,8 +100,8 @@ fn run_gui(options: Options) -> Result<(), Box<dyn Error>> {
     .settings(iced_t3::settings_for("linuxblaster-control"))
     .font(iced_aw::ICED_AW_FONT_BYTES)
     .window(iced::window::Settings {
-        size: iced::Size::new(1120.0, 900.0),
-        min_size: Some(iced::Size::new(860.0, 640.0)),
+        size: iced::Size::new(1120.0, 780.0),
+        min_size: Some(iced::Size::new(820.0, 560.0)),
         icon: Some(icon),
         // Matches the desktop entry, so the taskbar shows the app's icon.
         ..iced_t3::chrome::window_settings_for("linuxblaster-control")
