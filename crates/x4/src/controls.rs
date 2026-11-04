@@ -3,7 +3,7 @@
 //! and are deliberately not exposed.
 use crate::{
     X4,
-    protocol::{Result, invalid, unsupported},
+    error::{Result, invalid, unsupported},
 };
 use std::io::{Read, Write};
 #[derive(Debug, Clone, Copy)]
@@ -72,6 +72,12 @@ pub enum ResetAction {
     Action1 = 1,
     Action2 = 2,
     Action3 = 3,
+}
+#[derive(Debug, Clone, Copy)]
+pub enum LowLevelControl {
+    Id18 = 0x18,
+    Id4c = 0x4c,
+    Id30 = 0x30,
 }
 impl<T: Read + Write> X4<T> {
     pub fn protocol_version(&mut self) -> Result<[u8; 2]> {
@@ -274,14 +280,6 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(p)
     }
-}
-#[derive(Debug, Clone, Copy)]
-pub enum LowLevelControl {
-    Id18 = 0x18,
-    Id4c = 0x4c,
-    Id30 = 0x30,
-}
-impl<T: Read + Write> X4<T> {
     /// Numeric register-like controls; physical semantics unresolved.
     pub fn low_level_read(
         &mut self,

@@ -6,7 +6,7 @@
 //! `docs/PROTOCOL.md` in the crate documents wire layouts and known gaps.
 //!
 //! ```no_run
-//! use soundblaster_x4::{open, protocol::Result};
+//! use soundblaster_x4::{Result, open};
 //! fn main() -> Result<()> {
 //!     let mut device = open(None)?;
 //!     let state = device.state()?;
@@ -18,49 +18,65 @@
 //! Reads are sequential, not an atomic device snapshot. Setters can partially
 //! succeed before an error; reconnect and read actual state after a failed
 //! exchange. Mixer GET and SET always carry an explicit channel.
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "Wire fields are narrowed only after their bounds are checked"
+)]
+
 pub mod controls;
 pub mod dsp;
+mod error;
 pub mod features;
 pub mod mixer;
 pub mod protocol;
 pub mod software;
 pub mod sxfi;
 pub mod transfer;
+use error::invalid;
+pub use error::{Error, Result};
 pub use features::{EqProfileInfo, SxfiMode};
 pub use mixer::{MixerControl, MixerGroup, MixerRange};
-pub use protocol::{Error, Result};
-use protocol::{Session, invalid};
+use protocol::{Session, word};
 use serde::{Deserialize, Serialize};
+use serialport::SerialPort;
 use std::{
     io::{Read, Write},
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+/// The transport [`open`] returns.
+pub type Port = serialport::TTYPort;
 
 /// Creative USB vendor ID.
 pub const VENDOR_ID: u16 = 0x041e;
 /// Sound Blaster X4 USB product ID; G6 devices are not supported.
 pub const PRODUCT_ID: u16 = 0x3278;
 
+/// Output selector: speaker is wire value `1`, headphone is `4` (u32 LE).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-/// Output selector: speaker is wire value `1`, headphone is `4` (u32 LE).
 pub enum Output {
     Speaker,
     Headphone,
 }
 impl Output {
-    fn value(self) -> u32 {
+    fn wire(self) -> u32 {
         match self {
             Self::Speaker => 1,
             Self::Headphone => 4,
         }
     }
+    fn from_wire(value: u32) -> Option<Self> {
+        [Self::Speaker, Self::Headphone]
+            .into_iter()
+            .find(|output| output.wire() == value)
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 /// Established command-`39` feature bits. Names come from Creative's managed
 /// enum; only Direct Mode and high gain have verified acoustic effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Feature {
     /// Bit 5: bypasses EQ and Super X-Fi processing.
     DirectMode,
@@ -101,43 +117,51 @@ const EQ_FIRST_BAND: u8 = 0x0b;
 const EQ_LAST_PARAMETER: u8 = 0x14;
 /// Readback tolerance for f32 EQ values.
 const EQ_TOLERANCE: f32 = 0.011;
-const PRESET_FORMAT: &str = "soundblaster-x4-eq-v1";
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Largest EQ gain in either direction, in dB, that this API writes.
+pub const EQ_LIMIT_DB: f32 = 12.0;
+/// Bytes in a stored EQ profile: a u32 count, then twelve DSP tuples.
+const PROFILE_SIZE: usize = 76;
+/// How long output and feature writes may take to read back.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
+const SETTLE_POLL: Duration = Duration::from_millis(40);
+
 /// Active hardware EQ: enable, preamp and ten gains in device band order.
 /// Band centres are 31, 62, 125, 250, 500 Hz, 1, 2, 4, 8 and 16 kHz.
 /// Wire values are IEEE-754 f32 LE, module `96`, parameters `09..14` (hex).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Equalizer {
     pub enabled: bool,
     pub preamp_db: f32,
     pub bands_db: [f32; 10],
 }
 impl Equalizer {
+    /// The preamp, then each band: the order of parameters `0a..14`.
+    fn gains(&self) -> impl Iterator<Item = f32> {
+        std::iter::once(self.preamp_db).chain(self.bands_db)
+    }
     /// Compare within device readback precision.
     pub fn approx_eq(&self, other: &Self) -> bool {
         self.enabled == other.enabled
-            && std::iter::once(self.preamp_db)
-                .chain(self.bands_db)
-                .zip(std::iter::once(other.preamp_db).chain(other.bands_db))
+            && self
+                .gains()
+                .zip(other.gains())
                 .all(|(a, b)| (a - b).abs() <= EQ_TOLERANCE)
     }
     /// Reject nonfinite gains and gains outside this API's -12..12 dB limit.
     pub fn validate(&self) -> Result<()> {
-        for value in
-            std::iter::once(&self.preamp_db).chain(self.bands_db.iter())
-        {
-            if !value.is_finite() || !(-12.0..=12.0).contains(value) {
-                return Err(invalid(
-                    "EQ gains must be finite and within the application's -12..12 dB limit",
-                ));
-            }
+        if self.gains().all(|gain| gain.abs() <= EQ_LIMIT_DB) {
+            Ok(())
+        } else {
+            Err(invalid(
+                "EQ gains must be finite and within the application's -12..12 dB limit",
+            ))
         }
-        Ok(())
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Sequential control snapshot, checked for route/SXFI/slot/Direct Mode changes.
 /// It does not include individual mixer channels or personalization assets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
     pub firmware: String,
     pub output: Output,
@@ -161,37 +185,17 @@ impl State {
         self.supported_features & feature.mask() != 0
             && self.reset_features & feature.mask() == 0
     }
-}
-
-/// Local EQ preset, deliberately incompatible with G6 profiles.
-/// Loading is local; applying updates the selected device EQ slot.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Preset {
-    pub format: String,
-    pub output: Output,
-    pub eq: Equalizer,
-}
-impl Preset {
-    /// Construct the versioned serializable value; performs no file or device I/O.
-    pub fn new(output: Output, eq: Equalizer) -> Self {
-        Self {
-            format: PRESET_FORMAT.into(),
-            output,
-            eq,
-        }
+    /// The slot the device has active.
+    pub fn active_profile(&self) -> Option<&EqProfileInfo> {
+        self.eq_profiles
+            .iter()
+            .find(|p| self.active_eq_profile == Some(p.index))
     }
-    /// Check the format, expected output and gain limits without applying it.
-    pub fn validate(&self, output: Output) -> Result<()> {
-        if self.format != PRESET_FORMAT {
-            return Err(invalid("This is not an X4 EQ preset"));
-        }
-        if self.output != output {
-            return Err(invalid(
-                "Preset output differs from the active output; switch outputs first",
-            ));
-        }
-        self.eq.validate()
+    /// Whether the device accepts EQ slot `index` right now: slot 3 only with
+    /// Super X-Fi on, the others only with it off, and none in Direct Mode.
+    pub fn eq_profile_available(&self, index: u8) -> bool {
+        !self.feature(Feature::DirectMode)
+            && self.sxfi.is_some_and(|mode| mode.uses_slot(index))
     }
 }
 
@@ -199,10 +203,15 @@ impl Preset {
 /// Opens exclusively at 115200 baud, asserts DTR/RTS, then initializes CDC.
 /// Multiple devices require an explicit path; serial access permissions are
 /// supplied by the caller's environment, not installed by this crate.
-pub fn open(port: Option<&str>) -> Result<X4<serialport::TTYPort>> {
+pub fn open(port: Option<&str>) -> Result<X4<Port>> {
     let ports = serialport::available_ports()?;
-    let candidates: Vec<_> = ports.iter().filter(|p| matches!(&p.port_type,
-        serialport::SerialPortType::UsbPort(info) if info.vid == VENDOR_ID && info.pid == PRODUCT_ID)).collect();
+    let candidates: Vec<_> = ports
+        .iter()
+        .filter(|p| {
+            matches!(&p.port_type, serialport::SerialPortType::UsbPort(info)
+                if info.vid == VENDOR_ID && info.pid == PRODUCT_ID)
+        })
+        .collect();
     let path = match port {
         Some(path) => {
             let canonical = std::fs::canonicalize(path)?;
@@ -224,11 +233,16 @@ pub fn open(port: Option<&str>) -> Result<X4<serialport::TTYPort>> {
             )));
         }
     };
-    let mut serial = serialport::new(&path, 115200).timeout(Duration::from_millis(20))
-        .flow_control(serialport::FlowControl::None).open_native()
-        .map_err(|e| invalid(format!("Cannot open {path}: {e}. Install the X4 udev rule and replug; close other controllers.")))?;
+    let mut serial = serialport::new(&path, 115_200)
+        .timeout(Duration::from_millis(20))
+        .flow_control(serialport::FlowControl::None)
+        .open_native()
+        .map_err(|e| {
+            invalid(format!(
+                "Cannot open {path}: {e}. Install the X4 udev rule and replug; close other controllers."
+            ))
+        })?;
     serial.set_exclusive(true)?;
-    use serialport::SerialPort;
     serial.write_data_terminal_ready(true)?;
     serial.write_request_to_send(true)?;
     X4::connect(serial)
@@ -258,11 +272,7 @@ impl<T: Read + Write> X4<T> {
         if p.len() != 5 {
             return Err(invalid("Invalid output reply"));
         }
-        match u32::from_le_bytes(p[1..5].try_into()?) {
-            1 => Ok(Output::Speaker),
-            4 => Ok(Output::Headphone),
-            _ => Err(invalid("Unknown output")),
-        }
+        Output::from_wire(word(&p, 1)).ok_or_else(|| invalid("Unknown output"))
     }
     /// GET `39 [02]`; return `(supported_mask, reset_required_mask)` from
     /// reply `02 supported:u32le reset:u32le`.
@@ -271,10 +281,7 @@ impl<T: Read + Write> X4<T> {
         if p.len() != 9 {
             return Err(invalid("Invalid feature support"));
         }
-        Ok((
-            u32::from_le_bytes(p[1..5].try_into()?),
-            u32::from_le_bytes(p[5..9].try_into()?),
-        ))
+        Ok((word(&p, 1), word(&p, 5)))
     }
     /// GET `39 [01 ff ff ff ff]`; reply `01 current_mask:u32le`.
     pub fn features(&mut self) -> Result<u32> {
@@ -282,7 +289,7 @@ impl<T: Read + Write> X4<T> {
         if p.len() != 5 {
             return Err(invalid("Invalid feature state"));
         }
-        Ok(u32::from_le_bytes(p[1..].try_into()?))
+        Ok(word(&p, 1))
     }
     /// Read one feature bit from [`Self::features`].
     pub fn feature(&mut self, feature: Feature) -> Result<bool> {
@@ -308,7 +315,7 @@ impl<T: Read + Write> X4<T> {
         if p.len() != 8 || p[..2] != [1, 0] {
             return Err(invalid("Invalid EQ response"));
         }
-        let value = f32::from_le_bytes(p[4..].try_into()?);
+        let value = f32::from_bits(word(&p, 4));
         if !value.is_finite() {
             return Err(invalid("Nonfinite EQ response"));
         }
@@ -316,17 +323,15 @@ impl<T: Read + Write> X4<T> {
     }
     /// Read all twelve active EQ parameters; enable must be exactly 0 or 1.
     pub fn eq(&mut self) -> Result<Equalizer> {
-        let enabled = self.eq_parameter(EQ_ENABLE)?;
-        if enabled != 0.0 && enabled != 1.0 {
-            return Err(invalid("Invalid EQ enable state"));
-        }
+        let enabled = enable_flag(self.eq_parameter(EQ_ENABLE)?)
+            .ok_or_else(|| invalid("Invalid EQ enable state"))?;
         let preamp_db = self.eq_parameter(EQ_PREAMP)?;
         let mut bands_db = [0.0; 10];
         for (i, band) in bands_db.iter_mut().enumerate() {
             *band = self.eq_parameter(EQ_FIRST_BAND + i as u8)?;
         }
         Ok(Equalizer {
-            enabled: enabled == 1.0,
+            enabled,
             preamp_db,
             bands_db,
         })
@@ -382,25 +387,19 @@ impl<T: Read + Write> X4<T> {
             .as_chunks::<4>()
             .0
             .iter()
-            .any(|v| *v == output.value().to_le_bytes())
+            .any(|v| *v == output.wire().to_le_bytes())
         {
             return Err(invalid("Output not supported"));
         }
         let mut payload = vec![0];
-        payload.extend(output.value().to_le_bytes());
+        payload.extend(output.wire().to_le_bytes());
         self.session.set(0x2c, &payload)?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            if self.output()? == output {
-                return Ok(());
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(self
-                    .session
-                    .mismatch("Output readback mismatch after settling"));
-            }
-            std::thread::sleep(Duration::from_millis(40));
-        }
+        self.settle(
+            SETTLE_TIMEOUT,
+            SETTLE_POLL,
+            "Output readback mismatch after settling",
+            |x4| Ok(x4.output()? == output),
+        )
     }
     /// SET `39 [00 bit enabled]`. Reject unsupported/reset-required features
     /// and poll readback for three seconds.
@@ -415,17 +414,31 @@ impl<T: Read + Write> X4<T> {
         }
         self.session
             .set(0x39, &[0, feature.bit(), u8::from(enabled)])?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        self.settle(
+            SETTLE_TIMEOUT,
+            SETTLE_POLL,
+            "Feature readback mismatch after settling",
+            |x4| Ok(x4.feature(feature)? == enabled),
+        )
+    }
+    /// Poll `settled` until it holds. Firmware ACKs asynchronous changes before
+    /// they land; running out of time means the device state is uncertain.
+    pub(crate) fn settle(
+        &mut self,
+        timeout: Duration,
+        poll: Duration,
+        message: &str,
+        mut settled: impl FnMut(&mut Self) -> Result<bool>,
+    ) -> Result<()> {
+        let deadline = Instant::now() + timeout;
         loop {
-            if self.feature(feature)? == enabled {
+            if settled(self)? {
                 return Ok(());
             }
-            if std::time::Instant::now() >= deadline {
-                return Err(self
-                    .session
-                    .mismatch("Feature readback mismatch after settling"));
+            if Instant::now() >= deadline {
+                return Err(self.session.mismatch(message));
             }
-            std::thread::sleep(Duration::from_millis(40));
+            std::thread::sleep(poll);
         }
     }
     fn set_eq_parameter(&mut self, parameter: u8, value: f32) -> Result<()> {
@@ -453,23 +466,19 @@ impl<T: Read + Write> X4<T> {
         let sxfi = self.sxfi()?;
         self.check_eq_context(output, profile, sxfi)?;
         let current = self.eq()?;
-        let desired = std::iter::once(eq.preamp_db).chain(eq.bands_db);
-        let previous =
-            std::iter::once(current.preamp_db).chain(current.bands_db);
         // Re-check context before every write: a button press can change
         // output, slot or Direct Mode between writes.
-        for (i, (value, old)) in desired.zip(previous).enumerate() {
+        for (parameter, (value, old)) in
+            (EQ_PREAMP..).zip(eq.gains().zip(current.gains()))
+        {
             if (value - old).abs() > 0.001 {
                 self.check_eq_context(output, profile, sxfi)?;
-                self.set_eq_parameter(EQ_PREAMP + i as u8, value)?;
+                self.set_eq_parameter(parameter, value)?;
             }
         }
         if eq.enabled != current.enabled {
             self.check_eq_context(output, profile, sxfi)?;
-            self.set_eq_parameter(
-                EQ_ENABLE,
-                if eq.enabled { 1.0 } else { 0.0 },
-            )?;
+            self.set_eq_parameter(EQ_ENABLE, f32::from(u8::from(eq.enabled)))?;
         }
         Ok(())
     }
@@ -492,73 +501,79 @@ impl<T: Read + Write> X4<T> {
         source: dsp::ProfileSource,
         index: u8,
     ) -> Result<Equalizer> {
-        if index > 3 {
-            return Err(invalid("Profile index outside 0..3"));
-        }
+        dsp::check_profile_index(index)?;
         let flags = bank.flags() | source.flag();
         let prefix = [1, 2, index, flags];
         let mut p = self
             .session
             .get(0x17, &prefix, |f| f.payload.starts_with(&prefix))?;
-        let mut data = Vec::new();
-        let mut total = None;
-        let mut complete = false;
+        let mut data = Vec::with_capacity(PROFILE_SIZE);
         for block in 0..128 {
             if p.len() < 7 || p[..4] != prefix {
                 return Err(invalid("Invalid profile header"));
             }
-            let size = u16::from_le_bytes([p[4], p[5]]) as usize;
-            if size != 76
-                || *total.get_or_insert(size) != size
+            if u16::from_le_bytes([p[4], p[5]]) as usize != PROFILE_SIZE
                 || p[6] & 0x7f != block
             {
                 return Err(invalid("Profile block order/size mismatch"));
             }
             data.extend_from_slice(&p[7..]);
-            if data.len() > size {
+            if data.len() > PROFILE_SIZE {
                 return Err(invalid("Oversized profile"));
             }
             if p[6] & 0x80 == 0 {
-                complete = true;
-                break;
+                return decode_profile(&data);
             }
-            p = self.session.next_profile_block(&prefix)?;
+            p = self
+                .session
+                .continuation(0x17, |f| f.payload.starts_with(&prefix))?;
         }
-        if !complete || Some(data.len()) != total || data.len() < 4 {
-            return Err(invalid("Incomplete profile"));
-        }
-        let count = u32::from_le_bytes(data[..4].try_into()?) as usize;
-        if count != 12 || data.len() != 4 + count * 6 {
-            return Err(invalid("Unsupported profile layout"));
-        }
-        let mut values = [None; 12];
-        for tuple in data[4..].as_chunks::<6>().0 {
-            if tuple[0] != EQ_MODULE
-                || !(EQ_ENABLE..=EQ_LAST_PARAMETER).contains(&tuple[1])
-            {
-                return Err(invalid("Unexpected profile parameter"));
-            }
-            let slot = &mut values[(tuple[1] - EQ_ENABLE) as usize];
-            if slot.is_some() {
-                return Err(invalid("Duplicate profile parameter"));
-            }
-            let value = f32::from_le_bytes(tuple[2..].try_into()?);
-            if !value.is_finite() {
-                return Err(invalid("Nonfinite profile value"));
-            }
-            *slot = Some(value);
-        }
-        let values = values.map(|v| v.expect("12 unique parameters checked"));
-        if values[0] != 0.0 && values[0] != 1.0 {
-            return Err(invalid("Invalid profile enable value"));
-        }
-        Ok(Equalizer {
-            enabled: values[0] == 1.0,
-            preamp_db: values[1],
-            bands_db: values[2..].try_into()?,
-        })
+        Err(invalid("Incomplete profile"))
     }
 }
 
+/// `0.0` or `1.0` as a bool; the device reports no other enable value.
+#[expect(clippy::float_cmp, reason = "The device sends these exact values")]
+fn enable_flag(value: f32) -> Option<bool> {
+    (value == 0.0 || value == 1.0).then_some(value == 1.0)
+}
+
+/// Decode a u32 record count and twelve `[96 parameter value:f32le]` tuples.
+fn decode_profile(data: &[u8]) -> Result<Equalizer> {
+    if data.len() != PROFILE_SIZE {
+        return Err(invalid("Incomplete profile"));
+    }
+    if word(data, 0) != 12 {
+        return Err(invalid("Unsupported profile layout"));
+    }
+    let mut values = [None; 12];
+    for tuple in data[4..].as_chunks::<6>().0 {
+        if tuple[0] != EQ_MODULE
+            || !(EQ_ENABLE..=EQ_LAST_PARAMETER).contains(&tuple[1])
+        {
+            return Err(invalid("Unexpected profile parameter"));
+        }
+        let slot = &mut values[(tuple[1] - EQ_ENABLE) as usize];
+        if slot.is_some() {
+            return Err(invalid("Duplicate profile parameter"));
+        }
+        let value = f32::from_bits(word(tuple, 2));
+        if !value.is_finite() {
+            return Err(invalid("Nonfinite profile value"));
+        }
+        *slot = Some(value);
+    }
+    let [enabled, preamp_db, bands_db @ ..] =
+        values.map(|v| v.expect("12 unique parameters checked"));
+    Ok(Equalizer {
+        enabled: enable_flag(enabled)
+            .ok_or_else(|| invalid("Invalid profile enable value"))?,
+        preamp_db,
+        bands_db,
+    })
+}
+
+#[cfg(test)]
+mod testing;
 #[cfg(test)]
 mod tests;

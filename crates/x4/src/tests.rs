@@ -1,80 +1,8 @@
 use super::*;
-use crate::protocol::{Frame, Parser, Session, unlock};
-use std::{
-    collections::{HashMap, VecDeque},
-    io,
-    sync::{Arc, Mutex},
+use crate::{
+    protocol::{Frame, Parser, Session, unlock},
+    testing::{Fake, ack, device, fake, hex, wire},
 };
-
-fn hex(s: &str) -> Vec<u8> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-        .collect()
-}
-fn wire(command: u8, payload: &[u8]) -> Vec<u8> {
-    let mut bytes = vec![0x5a, command, payload.len() as u8];
-    bytes.extend(payload);
-    bytes
-}
-#[derive(Default)]
-struct Fake {
-    responses: HashMap<Vec<u8>, Vec<u8>>,
-    /// Replies used once each, in order, before falling back to `responses`.
-    sequences: HashMap<Vec<u8>, VecDeque<Vec<u8>>>,
-    rx: VecDeque<u8>,
-    writes: Arc<Mutex<Vec<Vec<u8>>>>,
-    cold: bool,
-}
-impl Read for Fake {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if self.rx.is_empty() {
-            return Err(io::ErrorKind::TimedOut.into());
-        }
-        let n = buffer.len().min(2).min(self.rx.len());
-        for byte in &mut buffer[..n] {
-            *byte = self.rx.pop_front().unwrap();
-        }
-        Ok(n)
-    }
-}
-impl Write for Fake {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.writes.lock().unwrap().push(bytes.to_vec());
-        if self.cold && bytes.starts_with(b"unlock") {
-            self.rx.extend(b"unlock_OK\r\n");
-        }
-        if self.cold && bytes == b"SW_MODE1\r\n" {
-            self.responses.insert(hex("5a0300"), hex("5a03023b00"));
-        }
-        if let Some(response) =
-            self.sequences.get_mut(bytes).and_then(VecDeque::pop_front)
-        {
-            self.rx.extend(response);
-        } else if let Some(response) = self.responses.get(bytes) {
-            self.rx.extend(response);
-        }
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-fn fake(responses: Vec<(Vec<u8>, Vec<u8>)>) -> Fake {
-    Fake {
-        responses: responses.into_iter().collect(),
-        ..Default::default()
-    }
-}
-fn device(port: Fake) -> X4<Fake> {
-    X4 {
-        session: Session::new(port),
-        firmware: "fixture".into(),
-    }
-}
-fn ack(command: u8, status: u8) -> Vec<u8> {
-    wire(2, &[command, status, 0, 0, 0, 0, 0, 0, 0, 0])
-}
 
 #[test]
 fn every_fragment_boundary_and_coalesced_frames() {
@@ -104,7 +32,7 @@ fn every_fragment_boundary_and_coalesced_frames() {
         assert_eq!(frames, expected);
     }
     assert!(Parser::default().feed(&hex("5b02ffff")).is_err());
-    assert!(Parser::default().feed(&hex("5b020a")).unwrap().is_empty());
+    assert_eq!(Parser::default().feed(&hex("5b020a")).unwrap(), Vec::new());
 }
 #[test]
 fn real_unlock_vector() {
@@ -217,17 +145,6 @@ fn eq_and_profile_values_are_validated_before_any_io() {
         assert!(dev.apply_eq(Output::Headphone, &eq).is_err());
     }
     assert!(writes.lock().unwrap().is_empty());
-    let eq = Equalizer {
-        enabled: true,
-        preamp_db: 0.0,
-        bands_db: [0.0; 10],
-    };
-    assert!(
-        Preset::new(Output::Speaker, eq)
-            .validate(Output::Headphone)
-            .is_err()
-    );
-    assert!(serde_json::from_str::<Preset>(r#"{"sbx":true}"#).is_err());
 }
 #[test]
 fn feature_change_requires_support_ack_and_matching_readback() {

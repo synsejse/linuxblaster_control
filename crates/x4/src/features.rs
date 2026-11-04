@@ -8,19 +8,21 @@
 use crate::{
     Feature, Output, X4,
     dsp::{ProfileBank, ProfileField, ProfileSource},
-    protocol::{Result, invalid},
+    error::{Result, invalid},
+    protocol::word,
     sxfi::{ModeToken, SxfiQuery},
 };
 use serde::{Deserialize, Serialize};
 use std::{
     io::{Read, Write},
-    time::{Duration, Instant},
+    thread,
+    time::Duration,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 /// SXFI enable plus processing mode. `Off` preserves the latent selected mode;
 /// `On` selects ASCII `MV  `, `Battle` selects `PCG ` before enabling button 30.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SxfiMode {
     Off,
     On,
@@ -35,13 +37,20 @@ impl SxfiMode {
             Self::Battle => Some(ModeToken::Pcg),
         }
     }
+    /// Whether EQ slot `index` is the one this mode can use.
+    pub(crate) fn uses_slot(self, index: u8) -> bool {
+        (index == SXFI_SLOT) == (self != Self::Off)
+    }
 }
+/// How long the device may take to load a slot or change processing mode.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(4);
+const LOAD_POLL: Duration = Duration::from_millis(80);
 /// Button ID of the SXFI on/off switch in the command-`26` inventory.
 const SXFI_BUTTON: u16 = 30;
 /// Hardware EQ slot that becomes active with Super X-Fi.
 const SXFI_SLOT: u8 = 3;
-#[derive(Debug, Clone, Serialize, Deserialize)]
 /// On-device slot identity and UTF-16-decoded firmware name, not an app preset label.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EqProfileInfo {
     pub index: u8,
     pub name: String,
@@ -76,7 +85,9 @@ impl<T: Read + Write> X4<T> {
         if buttons.len() != 11 || buttons[1..3] != [255, 255] {
             return Err(invalid("Malformed button state"));
         }
-        Ok(u64::from_le_bytes(buttons[3..].try_into()?) & (1 << bit) != 0)
+        let state =
+            u64::from(word(&buttons, 3)) | u64::from(word(&buttons, 7)) << 32;
+        Ok(state & (1 << bit) != 0)
     }
     /// SET `26 [07 1e 00 enabled 00]`; acknowledgement only.
     pub(crate) fn write_sxfi_button(&mut self, enabled: bool) -> Result<()> {
@@ -161,7 +172,8 @@ impl<T: Read + Write> X4<T> {
                 .iter()
                 .map(|v| u16::from_le_bytes(*v))
                 .collect();
-            let name = String::from_utf16(&units)?
+            let name = String::from_utf16(&units)
+                .map_err(|_| invalid("EQ profile name is not UTF-16"))?
                 .trim_end_matches('\0')
                 .to_owned();
             profiles.push(EqProfileInfo { index, name });
@@ -171,26 +183,24 @@ impl<T: Read + Write> X4<T> {
     /// Device sends ACK before loading a profile and then emits EQ notifications.
     /// Match active and stored values so callers never receive an intermediate EQ.
     fn wait_eq_loaded(&mut self, output: Output, index: u8) -> Result<()> {
-        let end = Instant::now() + Duration::from_secs(4);
-        loop {
-            std::thread::sleep(Duration::from_millis(80));
-            if self.output()? != output {
-                return Err(invalid(
-                    "Output changed during processing transition",
-                ));
-            }
-            if self.active_eq_profile()? == index {
-                let expected = self.stored_eq_profile(output, index)?;
-                if expected.approx_eq(&self.eq()?) {
-                    return Ok(());
+        thread::sleep(LOAD_POLL);
+        self.settle(
+            LOAD_TIMEOUT,
+            LOAD_POLL,
+            "Device EQ profile did not settle; reconnect and read state",
+            |x4| {
+                if x4.output()? != output {
+                    return Err(invalid(
+                        "Output changed during processing transition",
+                    ));
                 }
-            }
-            if Instant::now() >= end {
-                return Err(self.session.mismatch(
-                    "Device EQ profile did not settle; reconnect and read state",
-                ));
-            }
-        }
+                if x4.active_eq_profile()? != index {
+                    return Ok(false);
+                }
+                let expected = x4.stored_eq_profile(output, index)?;
+                Ok(expected.approx_eq(&x4.eq()?))
+            },
+        )
     }
     pub(crate) fn check_eq_context(
         &mut self,
@@ -220,9 +230,7 @@ impl<T: Read + Write> X4<T> {
         if !self.eq_profiles(output)?.iter().any(|p| p.index == index) {
             return Err(invalid("EQ profile not advertised"));
         }
-        let enabled =
-            matches!(self.sxfi()?, Some(SxfiMode::On | SxfiMode::Battle));
-        if (index == SXFI_SLOT) != enabled {
+        if !self.sxfi()?.unwrap_or(SxfiMode::Off).uses_slot(index) {
             return Err(invalid(
                 "SXFI EQ requires Super X-Fi; Music, Movie and Footsteps require SXFI off",
             ));
@@ -251,24 +259,20 @@ impl<T: Read + Write> X4<T> {
             self.select_sxfi_token(token)?;
         }
         self.write_sxfi_button(mode != SxfiMode::Off)?;
-        let end = Instant::now() + Duration::from_secs(4);
-        loop {
-            std::thread::sleep(Duration::from_millis(80));
-            let index = self.active_eq_profile()?;
-            if self.sxfi()? == Some(mode)
-                && (index == SXFI_SLOT) == (mode != SxfiMode::Off)
-            {
-                return self.wait_eq_loaded(output, index);
-            }
-            if Instant::now() >= end {
-                return Err(self
-                    .session
-                    .mismatch("SXFI mode readback did not settle"));
-            }
-        }
+        thread::sleep(LOAD_POLL);
+        let mut index = 0;
+        self.settle(
+            LOAD_TIMEOUT,
+            LOAD_POLL,
+            "SXFI mode readback did not settle",
+            |x4| {
+                index = x4.active_eq_profile()?;
+                Ok(x4.sxfi()? == Some(mode) && mode.uses_slot(index))
+            },
+        )?;
+        self.wait_eq_loaded(output, index)
     }
 }
 
 #[cfg(test)]
-#[path = "feature_tests.rs"]
 mod tests;

@@ -1,21 +1,25 @@
 [package]
 name = "linuxblaster_control"
-version = "0.1.0"
-edition = "2024"
 description = "Control the Creative Sound Blaster X4 on Linux: output, Direct Mode, headphone gain and hardware EQ"
-license = "MIT"
-repository = "https://github.com/synsejse/linuxblaster_control"
 homepage = "https://github.com/synsejse/linuxblaster_control"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 iced_t3 = { path = "../iced_t3" }
 soundblaster-x4 = { path = "../x4" }
-serde_json = "1.0.148"
+serde_json.workspace = true
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
 iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "web-colors", "x11", "wayland", "tokio", "canvas", "image-without-codecs", "advanced"] }
-iced_aw = { version = "=0.14.1", default-features = false, features = ["number_input", "color_picker"] }
+iced_aw = { version = "=0.14.1", default-features = false, features = ["number_input"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 pollster = "0.4"
+
+[lints]
+workspace = true

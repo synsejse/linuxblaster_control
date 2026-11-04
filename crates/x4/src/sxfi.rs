@@ -2,11 +2,11 @@
 use crate::{
     X4,
     controls::Information,
-    protocol::{Result, invalid},
+    error::{Result, invalid},
 };
 use std::{
     io::{Read, Write},
-    time::{Duration, Instant},
+    time::Duration,
 };
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModeToken {
@@ -59,34 +59,39 @@ impl SxfiQuery {
             Self::Entries13 => 19,
         }
     }
+    /// The whole reply's length, for queries with a fixed one.
+    fn reply_length(self) -> Option<usize> {
+        match self {
+            Self::Capabilities => Some(8),
+            Self::State | Self::State10 => Some(2),
+            Self::Identifiers => Some(65),
+            Self::Identifier => Some(33),
+            Self::State09 | Self::Flag0f => Some(3),
+            Self::CurrentMode => Some(11),
+            Self::Capability0e => Some(6),
+            _ => None,
+        }
+    }
+    /// Bytes per entry, for queries that reply with a counted list.
+    fn entry_width(self) -> Option<usize> {
+        match self {
+            Self::Modes => Some(4),
+            Self::Capability12 => Some(1),
+            Self::Entries13 => Some(7),
+            _ => None,
+        }
+    }
 }
 impl<T: Read + Write> X4<T> {
     /// Runtime gates can reject queries; identifiers never establish personalization activation.
     pub fn sxfi_query(&mut self, query: SxfiQuery) -> Result<Information> {
-        let s = query.selector();
-        let p = self.selector(0x6f, &[s])?;
-        let n = match s {
-            0 => Some(8),
-            5 | 16 => Some(2),
-            6 => Some(65),
-            8 => Some(33),
-            9 | 11 | 15 | 22 => Some(3),
-            13 => Some(11),
-            14 => Some(6),
-            21 => Some(9),
-            _ => None,
-        };
-        if n.is_some_and(|n| p.len() != n) || p.is_empty() {
+        let p = self.selector(0x6f, &[query.selector()])?;
+        if query.reply_length().is_some_and(|n| p.len() != n) || p.is_empty() {
             return Err(invalid("SXFI response length"));
         }
-        let width = match s {
-            3 => Some(4),
-            18 => Some(1),
-            19 => Some(7),
-            _ => None,
-        };
-        if let Some(w) = width
-            && (p.len() < 2 || p.len() != 2 + w * p[1] as usize)
+        if query
+            .entry_width()
+            .is_some_and(|w| p.len() < 2 || p.len() != 2 + w * p[1] as usize)
         {
             return Err(invalid("SXFI counted response"));
         }
@@ -95,19 +100,15 @@ impl<T: Read + Write> X4<T> {
     /// Returns after final ACK and matching current token, without enabling the button.
     pub fn set_sxfi_token(&mut self, token: ModeToken) -> Result<()> {
         self.select_sxfi_token(token)?;
-        let end = Instant::now() + Duration::from_secs(4);
-        loop {
-            let p = self.sxfi_query(SxfiQuery::CurrentMode)?.0;
-            if p[1..5] == token.bytes() {
-                return Ok(());
-            }
-            if Instant::now() >= end {
-                return Err(self
-                    .session
-                    .mismatch("SXFI token activation readback timeout"));
-            }
-            std::thread::sleep(Duration::from_millis(40));
-        }
+        self.settle(
+            Duration::from_secs(4),
+            Duration::from_millis(40),
+            "SXFI token activation readback timeout",
+            |x4| {
+                let p = x4.sxfi_query(SxfiQuery::CurrentMode)?.0;
+                Ok(p[1..5] == token.bytes())
+            },
+        )
     }
     pub fn set_sxfi_flag_0a(&mut self, value: bool) -> Result<()> {
         self.session.set(0x6f, &[10, u8::from(value)])

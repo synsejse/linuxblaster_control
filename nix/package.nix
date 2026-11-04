@@ -13,6 +13,20 @@
 , libglvnd
 }:
 
+let
+  runtimeLibraries = [
+    udev
+    wayland
+    libxkbcommon
+    vulkan-loader
+    libGL
+    libglvnd
+    libx11
+    libxcursor
+    libxi
+    libxrandr
+  ];
+in
 rustPlatform.buildRustPackage rec {
   pname = "linuxblaster_control";
   version = "0.1.0";
@@ -38,26 +52,7 @@ rustPlatform.buildRustPackage rec {
     pkg-config
   ];
 
-  buildInputs = [
-    udev
-    wayland
-    libxkbcommon
-    vulkan-loader
-    libGL
-    libglvnd
-    libx11 libxcursor libxi libxrandr
-  ];
-
-  # Runtime library path for dynamic linking
-  runtimeDependencies = [
-    udev
-    wayland
-    libxkbcommon
-    vulkan-loader
-    libGL
-    libglvnd
-    libx11 libxcursor libxi libxrandr
-  ];
+  buildInputs = runtimeLibraries;
 
   # Captured protocol tests and headless UI checks need no device or display.
   doCheck = true;
@@ -83,13 +78,11 @@ rustPlatform.buildRustPackage rec {
 
   postFixup = ''
     # Add runtime dependencies to the binary
-    patchelf --add-rpath "${lib.makeLibraryPath [ udev wayland libxkbcommon vulkan-loader libGL libglvnd libx11 libxcursor libxi libxrandr ]}" $out/bin/linuxblaster_control
+    patchelf --add-rpath "${lib.makeLibraryPath runtimeLibraries}" $out/bin/linuxblaster_control
   '';
 
   meta = with lib; {
     description = "Native Linux GUI application to control the Creative Sound Blaster X4";
-    longDescription = ''
-    '';
     homepage = "https://github.com/synsejse/linuxblaster_control";
     license = licenses.mit;
     maintainers = [ ];

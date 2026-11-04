@@ -13,6 +13,7 @@
 //! Session deadlines require a transport whose reads have finite timeouts.
 //! Failed exchanges invalidate the session; reconnect instead of replaying an
 //! uncertain write. `docs/PROTOCOL.md` documents command-specific payloads.
+use crate::error::{Error, Result, invalid};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use std::{
     collections::VecDeque,
@@ -20,18 +21,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Protocol, validation, transport and serial errors returned by this crate.
-/// Timeouts are `io::ErrorKind::TimedOut`; malformed replies and rejected
-/// requests are `InvalidData`; missing firmware support is `Unsupported`.
-pub type Error = Box<dyn std::error::Error + Send + Sync>;
-pub type Result<T> = std::result::Result<T, Error>;
-/// Construct an `InvalidData` error for a malformed reply or invalid request.
-pub fn invalid(message: impl Into<String>) -> Error {
-    io::Error::new(io::ErrorKind::InvalidData, message.into()).into()
-}
-/// Construct an `Unsupported` error for an operation this firmware lacks.
-pub fn unsupported(message: impl Into<String>) -> Error {
-    io::Error::new(io::ErrorKind::Unsupported, message.into()).into()
+/// Fixed part of the unlock key; the challenge supplies the bytes either side.
+const UNLOCK_KEY: [u8; 28] = [
+    0xd3, 0x1a, 0x21, 0x27, 0x9b, 0xe3, 0x46, 0xf0, 0x99, 0x9d, 0x6e, 0xc4,
+    0xc3, 0xfe, 0xbe, 0x98, 0x90, 0x18, 0x69, 0xc1, 0x18, 0xfb, 0xb1, 0x25,
+    0x6e, 0x0c, 0xe0, 0x7b,
+];
+/// Largest number of queued notifications or retained transfer replies.
+const QUEUE_LIMIT: usize = 128;
+
+/// The little-endian word at `at`; callers have checked the reply's length.
+pub(crate) fn word(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 /// Serial reads that return without data; deadlines are checked by callers.
 fn transient(error: &io::Error) -> bool {
@@ -43,8 +44,8 @@ fn transient(error: &io::Error) -> bool {
     )
 }
 
-#[derive(Debug, Clone, PartialEq)]
 /// Decoded command, payload and original framing marker; length bytes omitted.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
     /// Original framing marker: 0x5a or 0x5b.
     pub marker: u8,
@@ -52,9 +53,9 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
-#[derive(Default)]
 /// Incremental `5a`/`5b` decoder; skips bytes before a recognized marker.
 /// Incomplete frames remain buffered; payloads over 4096 bytes are rejected.
+#[derive(Default)]
 pub struct Parser {
     buffer: Vec<u8>,
 }
@@ -106,13 +107,8 @@ pub fn unlock(challenge: &[u8], random: [u8; 16]) -> Result<Vec<u8>> {
     if challenge.len() != 36 {
         return Err(invalid("Invalid challenge length"));
     }
-    let middle = [
-        0xd3, 0x1a, 0x21, 0x27, 0x9b, 0xe3, 0x46, 0xf0, 0x99, 0x9d, 0x6e, 0xc4,
-        0xc3, 0xfe, 0xbe, 0x98, 0x90, 0x18, 0x69, 0xc1, 0x18, 0xfb, 0xb1, 0x25,
-        0x6e, 0x0c, 0xe0, 0x7b,
-    ];
     let mut key = Vec::from(&challenge[..2]);
-    key.extend(middle);
+    key.extend(UNLOCK_KEY);
     key.extend_from_slice(&challenge[2..4]);
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|_| invalid("AES key length"))?;
@@ -124,6 +120,24 @@ pub fn unlock(challenge: &[u8], random: [u8; 16]) -> Result<Vec<u8>> {
     message.extend(encrypted);
     message.extend(b"\r\n");
     Ok(message)
+}
+
+/// The challenge, or the reply that says no challenge is coming, once `data`
+/// holds all of it.
+fn challenge_reply(data: &[u8]) -> Result<Option<Vec<u8>>> {
+    if let Some(start) = data.windows(9).position(|s| s == b"whoareyou") {
+        let Some(reply) = data.get(start..start + 47) else {
+            return Ok(None);
+        };
+        if &reply[45..] != b"\r\n" {
+            return Err(invalid("Malformed challenge"));
+        }
+        return Ok(Some(reply.to_vec()));
+    }
+    Ok([b"NotYet\r\n".as_slice(), b"Unknown command\r\n"]
+        .into_iter()
+        .find(|reply| data.ends_with(reply))
+        .map(<[u8]>::to_vec))
 }
 
 /// A single owner serializes all exchanges. A failed exchange invalidates this session.
@@ -201,7 +215,7 @@ impl<T: Read + Write> Session<T> {
     }
     fn notify(&mut self, frame: Frame) -> Result<()> {
         // Bounded: physical controls can be active indefinitely.
-        if self.notifications.len() == 128 {
+        if self.notifications.len() == QUEUE_LIMIT {
             self.pending.push_front(frame);
             return Err(invalid(
                 "Notification queue full; drain notifications before continuing",
@@ -250,7 +264,7 @@ impl<T: Read + Write> Session<T> {
                     return Ok(frame);
                 }
                 if self.transfer_active && frame.command == 0x98 {
-                    if self.retained.len() >= 128 {
+                    if self.retained.len() >= QUEUE_LIMIT {
                         return Err(invalid("Transfer response queue full"));
                     }
                     self.retained.push_back(frame);
@@ -259,8 +273,7 @@ impl<T: Read + Write> Session<T> {
                 }
             }
             if Instant::now() >= end {
-                return Err(io::Error::new(io::ErrorKind::TimedOut,
-                "X4 response timed out; reopen and read state before another write").into());
+                return Err(Error::Timeout);
             }
             self.receive()?;
         }
@@ -271,18 +284,12 @@ impl<T: Read + Write> Session<T> {
         payload: &[u8],
     ) -> Result<()> {
         self.ensure_usable()?;
-        if payload.len() > self.max_payload {
+        if payload.len() > self.max_payload.min(255) {
             return Err(invalid("Command exceeds negotiated payload limit"));
         }
         // Keep earlier notifications for the caller; they are never replies.
         self.drain_input()?;
-        let mut wire = if payload.len() <= 255 {
-            vec![0x5a, command, payload.len() as u8]
-        } else {
-            let mut h = vec![0x5b, command];
-            h.extend((payload.len() as u16).to_le_bytes());
-            h
-        };
+        let mut wire = vec![0x5a, command, payload.len() as u8];
         wire.extend_from_slice(payload);
         self.port.write_all(&wire)?;
         Ok(())
@@ -350,7 +357,7 @@ impl<T: Read + Write> Session<T> {
                     return Err(invalid("Malformed pending ACK"));
                 }
                 match frame.payload[1] {
-                    1 if frame.payload.len() == 4 => continue,
+                    1 if frame.payload.len() == 4 => {}
                     0 if frame.payload.len() == 10
                         && frame.payload.get(2) == Some(&selector) =>
                     {
@@ -422,10 +429,14 @@ impl<T: Read + Write> Session<T> {
         self.ensure_usable()?;
         self.guarded(|s| Ok(s.port.write_all(wire)?))
     }
-    fn ascii(&mut self, challenge: bool) -> Result<Vec<u8>> {
+    /// Read until `reply` recognizes a complete ASCII reply. Reads one byte at
+    /// a time to leave any following binary frames in the port.
+    fn ascii(
+        &mut self,
+        reply: impl Fn(&[u8]) -> Result<Option<Vec<u8>>>,
+    ) -> Result<Vec<u8>> {
         let end = Instant::now() + self.timeout;
         let mut data = Vec::new();
-        // Read one byte to leave any following binary frames in the port.
         while Instant::now() < end && data.len() <= 4096 {
             let mut byte = [0];
             match self.port.read(&mut byte) {
@@ -434,28 +445,8 @@ impl<T: Read + Write> Session<T> {
                 Err(e) if transient(&e) => continue,
                 Err(e) => return Err(e.into()),
             }
-            if challenge {
-                if let Some(start) =
-                    data.windows(9).position(|s| s == b"whoareyou")
-                {
-                    if data.len() >= start + 47 {
-                        let reply = &data[start..start + 47];
-                        if &reply[45..] != b"\r\n" {
-                            return Err(invalid("Malformed challenge"));
-                        }
-                        return Ok(reply.to_vec());
-                    }
-                } else {
-                    for reply in
-                        [b"NotYet\r\n".as_slice(), b"Unknown command\r\n"]
-                    {
-                        if data.ends_with(reply) {
-                            return Ok(reply.to_vec());
-                        }
-                    }
-                }
-            } else if data.ends_with(b"unlock_OK\r\n") {
-                return Ok(data);
+            if let Some(reply) = reply(&data)? {
+                return Ok(reply);
             }
         }
         Err(invalid("No valid X4 unlock response"))
@@ -469,38 +460,8 @@ impl<T: Read + Write> Session<T> {
     fn initialize(&mut self) -> Result<String> {
         let payload = match self.get(3, &[], |_| true) {
             Ok(p) => p,
-            Err(e)
-                if e.downcast_ref::<io::Error>()
-                    .is_some_and(|e| e.kind() == io::ErrorKind::TimedOut) =>
-            {
-                self.usable = true;
-                self.parser = Parser::default();
-                self.pending.clear();
-                let mut response = Vec::new();
-                for _ in 0..3 {
-                    self.port.write_all(b"\r\nwhoareyou.MyApp8\r\n")?;
-                    response = self.ascii(true)?;
-                    if response != b"NotYet\r\n" {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-                if response.starts_with(b"whoareyou") {
-                    let mut random = [0; 16];
-                    getrandom::getrandom(&mut random)
-                        .map_err(|e| invalid(e.to_string()))?;
-                    self.port.write_all(&unlock(&response[9..45], random)?)?;
-                    self.ascii(false)?;
-                } else if response != b"Unknown command\r\n" {
-                    return Err(invalid("X4 is still booting"));
-                }
-                self.port.write_all(b"SW_MODE1\r\n")?;
-                let ack = self.wait(|f| {
-                    f.command == 2 && f.payload.first() == Some(&0x6d)
-                })?;
-                if ack.payload.len() != 10 || ack.payload[1] != 0 {
-                    return Err(invalid("SW_MODE1 failed"));
-                }
+            Err(e) if e.is_timeout() => {
+                self.unlock_channel()?;
                 self.get(3, &[], |_| true)?
             }
             Err(e) => return Err(e),
@@ -517,14 +478,41 @@ impl<T: Read + Write> Session<T> {
         if fw.len() < 2 || fw.len() != fw[1] as usize + 2 {
             return Err(invalid("Malformed firmware response"));
         }
-        Ok(std::str::from_utf8(&fw[2..])?.trim_end_matches('\0').into())
+        let firmware = std::str::from_utf8(&fw[2..])
+            .map_err(|_| invalid("Firmware version is not UTF-8"))?;
+        Ok(firmware.trim_end_matches('\0').into())
     }
-    /// Receive the next command-`17` block with this prefix without sending a query.
-    /// The caller validates numbering, continuation flags and total assembled size.
-    pub fn next_profile_block(&mut self, prefix: &[u8]) -> Result<Vec<u8>> {
-        self.guarded(|s| {
-            s.wait(|f| f.command == 0x17 && f.payload.starts_with(prefix))
-                .map(|f| f.payload)
-        })
+    /// The ASCII handshake a cold X4 needs before it accepts binary frames.
+    fn unlock_channel(&mut self) -> Result<()> {
+        self.usable = true;
+        self.parser = Parser::default();
+        self.pending.clear();
+        let mut response = Vec::new();
+        for _ in 0..3 {
+            self.port.write_all(b"\r\nwhoareyou.MyApp8\r\n")?;
+            response = self.ascii(challenge_reply)?;
+            if response != b"NotYet\r\n" {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        if response.starts_with(b"whoareyou") {
+            let mut random = [0; 16];
+            getrandom::getrandom(&mut random)
+                .map_err(|e| invalid(e.to_string()))?;
+            self.port.write_all(&unlock(&response[9..45], random)?)?;
+            self.ascii(|data| {
+                Ok(data.ends_with(b"unlock_OK\r\n").then(|| data.to_vec()))
+            })?;
+        } else if response != b"Unknown command\r\n" {
+            return Err(invalid("X4 is still booting"));
+        }
+        self.port.write_all(b"SW_MODE1\r\n")?;
+        let ack =
+            self.wait(|f| f.command == 2 && f.payload.first() == Some(&0x6d))?;
+        if ack.payload.len() != 10 || ack.payload[1] != 0 {
+            return Err(invalid("SW_MODE1 failed"));
+        }
+        Ok(())
     }
 }

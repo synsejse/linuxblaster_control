@@ -1,66 +1,21 @@
 //! Captures are from backups/before-feature-research/probe-trace.jsonl.
-use crate::{Output, SxfiMode, X4, protocol::Session};
-use std::{
-    collections::{HashMap, VecDeque},
-    io::{self, Read, Write},
-    sync::{Arc, Mutex},
+use crate::{
+    Output, SxfiMode,
+    protocol::Session,
+    testing::{Fake, device, hex, wire},
 };
+use std::sync::{Arc, Mutex};
 
 type Writes = Arc<Mutex<Vec<Vec<u8>>>>;
-#[derive(Default)]
-struct Fake {
-    replies: HashMap<Vec<u8>, Vec<u8>>,
-    rx: VecDeque<u8>,
-    writes: Writes,
-}
-impl Read for Fake {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if self.rx.is_empty() {
-            return Err(io::ErrorKind::TimedOut.into());
-        }
-        let n = out.len().min(2).min(self.rx.len());
-        for byte in &mut out[..n] {
-            *byte = self.rx.pop_front().unwrap();
-        }
-        Ok(n)
-    }
-}
-impl Write for Fake {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.writes.lock().unwrap().push(bytes.to_vec());
-        let reply = self.replies.get(bytes).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Unexpected test request {bytes:02x?}"),
-            )
-        })?;
-        self.rx.extend(reply);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-fn hex(s: &str) -> Vec<u8> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-        .collect()
-}
-fn wire(command: u8, payload: &[u8]) -> Vec<u8> {
-    let mut frame = vec![0x5a, command, payload.len() as u8];
-    frame.extend(payload);
-    frame
-}
-fn device(fake: Fake) -> X4<Fake> {
-    X4 {
-        session: Session::new(fake),
-        firmware: "fixture".into(),
+fn strict() -> Fake {
+    Fake {
+        strict: true,
+        ..Default::default()
     }
 }
 fn profiles_fake() -> Fake {
-    let mut fake = Fake::default();
-    fake.replies.insert(
+    let mut fake = strict();
+    fake.responses.insert(
         hex("5a1d03010202"),
         hex("5a1d160100020204040e408c0003408c0002408c0002408c00"),
     );
@@ -73,29 +28,29 @@ fn profiles_fake() -> Fake {
         ),
         ("5a1803010203", "5a180e0102030404005300580046004900"),
     ] {
-        fake.replies.insert(hex(tx), hex(rx));
+        fake.responses.insert(hex(tx), hex(rx));
     }
     fake
 }
 fn add_context(fake: &mut Fake, output: Output, direct: bool, sxfi: bool) {
-    fake.replies.insert(
+    fake.responses.insert(
         wire(0x2c, &[1]),
         wire(
             0x2c,
             &[1, if output == Output::Headphone { 4 } else { 1 }, 0, 0, 0],
         ),
     );
-    fake.replies.insert(
+    fake.responses.insert(
         wire(0x39, &[1, 255, 255, 255, 255]),
         wire(0x39, &[1, if direct { 0x20 } else { 0 }, 0, 0, 0]),
     );
-    fake.replies
+    fake.responses
         .insert(wire(0x26, &[5]), hex("5a2606050001001e00"));
-    fake.replies.insert(
+    fake.responses.insert(
         wire(0x26, &[8, 255, 255]),
         wire(0x26, &[8, 255, 255, u8::from(sxfi), 0, 0, 0, 0, 0, 0, 0]),
     );
-    fake.replies
+    fake.responses
         .insert(wire(0x6f, &[0x0d]), hex("5a6f0b0d4d562020303030322e30"));
 }
 fn assert_no_setting_writes(writes: &Writes) {
@@ -136,7 +91,7 @@ fn profile_name_decoder_handles_utf16_surrogate_pairs() {
     for unit in "Č🎵".encode_utf16() {
         p.extend(unit.to_le_bytes());
     }
-    fake.replies.insert(hex("5a1803010200"), wire(0x18, &p));
+    fake.responses.insert(hex("5a1803010200"), wire(0x18, &p));
     assert_eq!(
         device(fake).eq_profiles(Output::Headphone).unwrap()[0].name,
         "Č🎵"
@@ -145,7 +100,7 @@ fn profile_name_decoder_handles_utf16_surrogate_pairs() {
 #[test]
 fn profile_count_and_name_lengths_are_validated() {
     let mut fake = profiles_fake();
-    fake.replies.insert(
+    fake.responses.insert(
         hex("5a1d03010202"),
         hex("5a1d160100020204030e408c0003408c0002408c0002408c00"),
     );
@@ -153,7 +108,7 @@ fn profile_count_and_name_lengths_are_validated() {
     assert!(device(fake).eq_profiles(Output::Headphone).is_err());
     assert_eq!(writes.lock().unwrap().len(), 1);
     let mut fake = profiles_fake();
-    fake.replies
+    fake.responses
         .insert(hex("5a1803010200"), hex("5a18080102000505004d00"));
     assert!(device(fake).eq_profiles(Output::Headphone).is_err());
 }
@@ -164,17 +119,17 @@ fn sxfi_state_uses_capability_order_and_decodes_modes() {
         (4, "0d50434720303030372e31", SxfiMode::Battle),
         (1, "0d50434720303030372e31", SxfiMode::Off),
     ] {
-        let mut fake = Fake::default();
+        let mut fake = strict();
         // SXFI ID=30 occupies bit 2, not bit 30 or the first bit.
-        fake.replies.insert(
+        fake.responses.insert(
             wire(0x26, &[5]),
             wire(0x26, &[5, 0, 3, 0, 1, 0, 2, 0, 30, 0]),
         );
-        fake.replies.insert(
+        fake.responses.insert(
             wire(0x26, &[8, 255, 255]),
             wire(0x26, &[8, 255, 255, mask, 0, 0, 0, 0, 0, 0, 0]),
         );
-        fake.replies
+        fake.responses
             .insert(wire(0x6f, &[0x0d]), wire(0x6f, &hex(mode)));
         let writes = fake.writes.clone();
         assert_eq!(device(fake).sxfi().unwrap(), Some(expected));
@@ -186,9 +141,9 @@ fn sxfi_state_uses_capability_order_and_decodes_modes() {
 }
 #[test]
 fn sxfi_unknown_mode_is_not_reported_as_on() {
-    let mut fake = Fake::default();
+    let mut fake = strict();
     add_context(&mut fake, Output::Headphone, false, true);
-    fake.replies
+    fake.responses
         .insert(wire(0x6f, &[0x0d]), wire(0x6f, b"\x0dXXXX0002.0"));
     assert!(device(fake).sxfi().is_err());
 }
@@ -198,8 +153,8 @@ fn captured_pending_ack_then_final_ack_does_not_resend() {
     let mut response = hex("5a02046f010a00");
     response.extend(hex("5a260b08ffff0100000000000000"));
     response.extend(hex("5a020a6f000c00000000000000"));
-    let mut fake = Fake::default();
-    fake.replies.insert(command.clone(), response);
+    let mut fake = strict();
+    fake.responses.insert(command.clone(), response);
     let writes = fake.writes.clone();
     let mut session = Session::new(fake);
     session.set_pending(0x6f, b"\x0cMV  ", 0x0c).unwrap();
@@ -217,8 +172,8 @@ fn pending_failure_or_wrong_terminal_selector_invalidates_session() {
         let command = hex("5a6f050c4d562020");
         let mut response = hex("5a02046f010a00");
         response.extend(wire(2, &final_payload));
-        let mut fake = Fake::default();
-        fake.replies.insert(command, response);
+        let mut fake = strict();
+        fake.responses.insert(command, response);
         let writes = fake.writes.clone();
         let mut session = Session::new(fake);
         assert!(session.set_pending(0x6f, b"\x0cMV  ", 0x0c).is_err());
@@ -236,7 +191,7 @@ fn invalid_profile_index_or_sxfi_context_never_writes_settings() {
         assert!(device(fake).set_eq_profile(index).is_err());
         assert_no_setting_writes(&writes);
     }
-    let mut fake = Fake::default();
+    let mut fake = strict();
     add_context(&mut fake, Output::Headphone, true, false);
     let writes = fake.writes.clone();
     assert!(device(fake).set_eq_profile(0).is_err());
@@ -247,7 +202,7 @@ fn sxfi_write_requires_headphone_output_and_direct_mode_off() {
     for (output, direct) in
         [(Output::Speaker, false), (Output::Headphone, true)]
     {
-        let mut fake = Fake::default();
+        let mut fake = strict();
         add_context(&mut fake, output, direct, false);
         let writes = fake.writes.clone();
         assert!(device(fake).set_sxfi(SxfiMode::On).is_err());
@@ -257,15 +212,15 @@ fn sxfi_write_requires_headphone_output_and_direct_mode_off() {
 #[test]
 fn sxfi_button_write_checks_state_bit_and_poisons_on_mismatch() {
     for (actual, succeeds) in [(1, true), (0, false)] {
-        let mut fake = Fake::default();
-        fake.replies
+        let mut fake = strict();
+        fake.responses
             .insert(wire(0x26, &[5]), wire(0x26, &[5, 0, 2, 0, 1, 0, 30, 0]));
-        fake.replies.insert(
+        fake.responses.insert(
             wire(0x26, &[7, 30, 0, 1, 0]),
             wire(2, &[0x26, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
         );
         // SXFI is the second advertised button: state bit 1.
-        fake.replies.insert(
+        fake.responses.insert(
             wire(0x26, &[8, 255, 255]),
             wire(0x26, &[8, 255, 255, actual << 1, 0, 0, 0, 0, 0, 0, 0]),
         );

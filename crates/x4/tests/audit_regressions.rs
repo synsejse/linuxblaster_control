@@ -1,6 +1,13 @@
 //! Synthetic fixtures derived from the 2026-10-30 firmware audits. No new live observations.
+#![expect(
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation,
+    reason = "Scripts build small fixed frames, and a bad one should fail the test"
+)]
+
 use soundblaster_x4::{
-    X4, dsp::*, protocol::Session, software::*, sxfi::ModeToken, transfer::*,
+    Error, X4, dsp::*, protocol::Session, software::*, sxfi::ModeToken,
+    transfer::*,
 };
 use std::{
     collections::VecDeque,
@@ -157,21 +164,21 @@ fn dsp_fragment_boundaries_bits_and_unrelated_frames() {
         let mut p = vec![chunk.len() as u8, u8::from(i == 0)];
         for v in chunk {
             p.extend([v.module, v.parameter]);
-            p.extend(0x80000000u32.to_le_bytes());
+            p.extend(0x8000_0000_u32.to_le_bytes());
         }
         reply.extend(frame(0x11, &p));
     }
     let mut d = dev(vec![(frame(0x11, &q), reply)]);
     let v = d.dsp_read(&params, false).unwrap();
     assert_eq!(v.len(), 12);
-    assert!(v.iter().all(|v| v.bits == 0x80000000));
+    assert!(v.iter().all(|v| v.bits == 0x8000_0000));
     assert_eq!(d.session.notifications.front().unwrap().command, 0x70);
     assert!(decode_fragment(&[10, 0]).is_err());
 }
 #[test]
 fn codecs_crc_resume_bitmap_and_processing() {
-    assert_eq!(crc32(0, b"123456789"), 0xcbf43926);
-    assert_eq!(crc32(crc32(0, b"1234"), b"56789"), 0xcbf43926);
+    assert_eq!(crc32(0, b"123456789"), 0xcbf4_3926);
+    assert_eq!(crc32(crc32(0, b"1234"), b"56789"), 0xcbf4_3926);
     let info = TransferInfo {
         total: 400,
         offset: 20,
@@ -233,7 +240,7 @@ fn upload_script(status: u8, ack_offset: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
         crc: Some(crc32(0, &data)),
     };
     let mut progress = vec![4, 0];
-    progress.extend(0xfffffffeu32.to_le_bytes());
+    progress.extend(0xffff_fffe_u32.to_le_bytes());
     progress.extend(3u32.to_le_bytes());
     let mut ack = vec![0x98, 0, 5];
     ack.extend(ack_offset.to_le_bytes());
@@ -273,10 +280,7 @@ fn upload_resume_is_explicit_error() {
     )]);
     let a = PreparedUpload::new(UploadKind::Metadata, vec![1]).unwrap();
     let e = d.upload_prepared(&a).unwrap_err();
-    assert_eq!(
-        e.downcast_ref::<io::Error>().unwrap().kind(),
-        io::ErrorKind::Unsupported
-    );
+    assert!(matches!(e, Error::Unsupported(_)));
 }
 #[test]
 fn upload_missing_mask_resends_only_requested_slot_and_checks_offset() {
@@ -297,7 +301,7 @@ fn upload_missing_mask_resends_only_requested_slot_and_checks_offset() {
     let mut steps = upload_script(0, 3);
     let final_marker = steps[3].clone();
     let mut recovery = vec![4, 0x81];
-    recovery.extend(0xfffffffdu32.to_le_bytes());
+    recovery.extend(0xffff_fffd_u32.to_le_bytes());
     recovery.extend(0u32.to_le_bytes());
     steps[3].1 = frame(0x98, &recovery);
     steps.insert(4, steps[2].clone());
@@ -333,7 +337,7 @@ fn download_checks_complete_window_and_crc_before_sanitizing() {
         let mut start = vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 31];
         start.extend(59u16.to_le_bytes());
         let mut progress = vec![4, 0];
-        progress.extend(0xfffffff0u32.to_le_bytes());
+        progress.extend(0xffff_fff0_u32.to_le_bytes());
         progress.extend(154u32.to_le_bytes());
         let mut steps = vec![
             (
@@ -359,7 +363,7 @@ fn download_checks_complete_window_and_crc_before_sanitizing() {
         ];
         if missing {
             let mut recovery = vec![4, 0x81];
-            recovery.extend(0xfffffff2u32.to_le_bytes());
+            recovery.extend(0xffff_fff2_u32.to_le_bytes());
             recovery.extend(0u32.to_le_bytes());
             let mut recovered = w
                 .frame(&data_payload(w, 1, &bytes[51..102]).unwrap())
@@ -515,7 +519,7 @@ fn metadata_download_variable_lengths_and_invalid_strings() {
 fn download_log_script(width: FrameWidth, bad: u8) -> Vec<(Vec<u8>, Vec<u8>)> {
     let w = FrameWidth::Extended;
     let stride = if width == FrameWidth::Short { 53 } else { 51 };
-    let data: Vec<u8> = (0..stride * 3 + 1).map(|i| i as u8).collect();
+    let data: Vec<u8> = (0..=stride * 3).map(|i| i as u8).collect();
     let info = TransferInfo {
         total: data.len() as u32,
         offset: 0,
@@ -554,7 +558,7 @@ fn download_log_script(width: FrameWidth, bad: u8) -> Vec<(Vec<u8>, Vec<u8>)> {
     let ack = |sel| vec![0x5b, 2, 10, 0, 0x98, 0, sel, 0, 0, 0, 0, 0, 0, 0];
     let progress = |n: usize| {
         let mut p = vec![4, 0];
-        p.extend(0xfffffffcu32.to_le_bytes());
+        p.extend(0xffff_fffc_u32.to_le_bytes());
         p.extend((n as u32).to_le_bytes());
         w.frame(&p).unwrap()
     };
@@ -731,7 +735,7 @@ fn full_upload_window_requires_all_bits_clear_and_repeats_final_marker() {
             w.frame(&data_payload(w, 0, &data[..24]).unwrap()).unwrap();
         steps[3].0 = w.frame(&[6, 128, 1]).unwrap();
         let mut reply = vec![4, 0];
-        reply.extend((0xfffffffcu32 | missing).to_le_bytes());
+        reply.extend((0xffff_fffc_u32 | missing).to_le_bytes());
         reply.extend(48u32.to_le_bytes());
         steps[3].1 = frame(0x98, &reply);
         steps[4].0 = w.frame(&[5, 48, 0, 0, 0]).unwrap();
@@ -787,7 +791,7 @@ fn nonfinal_missing_slot_recovers_after_host_interval() {
     let mut steps = download_log_script(w, 0);
     let missing = steps[2].1.drain(..59).collect::<Vec<_>>();
     let mut response = vec![4, 0x81];
-    response.extend(0xfffffffeu32.to_le_bytes());
+    response.extend(0xffff_fffe_u32.to_le_bytes());
     response.extend(0u32.to_le_bytes());
     steps.insert(3, (w.frame(&response).unwrap(), missing));
     assert!(dev(steps).download_asset(DownloadKind::Log).is_ok());

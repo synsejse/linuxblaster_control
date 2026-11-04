@@ -4,12 +4,25 @@
 use crate::{
     X4,
     controls::Information,
-    protocol::{Result, invalid, unsupported},
+    error::{Result, invalid, unsupported},
+    protocol::{Frame, word},
 };
 use std::{
     io::{Read, Write},
     time::{Duration, Instant},
 };
+/// Upload frames use the extended header whatever their size.
+const UPLOAD_WIDTH: FrameWidth = FrameWidth::Extended;
+/// Largest asset the host stages or downloads.
+const ASSET_LIMIT: usize = 16 * 1024 * 1024;
+/// Resends of an upload window's missing slots before giving up.
+const UPLOAD_RETRIES: u8 = 32;
+/// Recovery requests in a download window before giving up.
+const DOWNLOAD_RETRIES: u8 = 10;
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a download waits for a frame before asking again.
+const DOWNLOAD_POLL: Duration = Duration::from_secs(1);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameWidth {
     Short,
@@ -32,10 +45,24 @@ impl FrameWidth {
         p.extend(payload);
         Ok(p)
     }
+    fn from_marker(marker: u8) -> Result<Self> {
+        match marker {
+            0x5a => Ok(Self::Short),
+            0x5b => Ok(Self::Extended),
+            _ => Err(invalid("Unknown data marker")),
+        }
+    }
     fn overhead(self) -> u16 {
         match self {
             Self::Short => 6,
             Self::Extended => 8,
+        }
+    }
+    /// Bytes before a data slot's contents: `04 slot length`.
+    fn data_header(self) -> usize {
+        match self {
+            Self::Short => 3,
+            Self::Extended => 4,
         }
     }
 }
@@ -61,9 +88,6 @@ impl StartReply {
         })
     }
 }
-fn word(p: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(p[at..at + 4].try_into().unwrap())
-}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransferInfo {
     pub total: u32,
@@ -83,24 +107,19 @@ impl TransferInfo {
         {
             return Err(invalid("Transfer info shape/checksum kind"));
         }
-        let info = Self {
+        Self {
             total: word(p, 1),
             offset: word(p, 5),
             token: word(p, 9),
             slots: p[13],
             resume: p[14] & 128 != 0,
             packet_size: u16::from_le_bytes([p[15], p[16]]),
-            crc: if p[17] == 1 { Some(word(p, 18)) } else { None },
-        };
-        if info.slots == 0 || info.slots > 32 || info.offset > info.total {
-            return Err(invalid("Transfer info bounds"));
+            crc: (p[17] == 1).then(|| word(p, 18)),
         }
-        Ok(info)
+        .checked()
     }
     pub fn encode(self) -> Result<Vec<u8>> {
-        if self.slots == 0 || self.slots > 32 || self.offset > self.total {
-            return Err(invalid("Transfer info bounds"));
-        }
+        self.checked()?;
         let mut p = vec![3];
         p.extend(self.total.to_le_bytes());
         p.extend(self.offset.to_le_bytes());
@@ -112,6 +131,12 @@ impl TransferInfo {
             p.extend(c.to_le_bytes());
         }
         Ok(p)
+    }
+    fn checked(self) -> Result<Self> {
+        if self.slots == 0 || self.slots > 32 || self.offset > self.total {
+            return Err(invalid("Transfer info bounds"));
+        }
+        Ok(self)
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,9 +199,9 @@ impl ProcessingResult {
 pub fn crc32(previous: u32, bytes: &[u8]) -> u32 {
     let mut c = !previous;
     for b in bytes {
-        c ^= *b as u32;
+        c ^= u32::from(*b);
         for _ in 0..8 {
-            c = (c >> 1) ^ if c & 1 != 0 { 0xedb88320 } else { 0 };
+            c = (c >> 1) ^ if c & 1 != 0 { 0xedb8_8320 } else { 0 };
         }
     }
     !c
@@ -197,7 +222,7 @@ pub fn data_payload(
     match width {
         FrameWidth::Short => p.push(data.len() as u8),
         FrameWidth::Extended => p.extend((data.len() as u16).to_le_bytes()),
-    };
+    }
     p.extend(data);
     Ok(p)
 }
@@ -234,7 +259,7 @@ impl PreparedUpload {
         }
         match kind {
             UploadKind::FirmwareStage => {
-                if data.len() > 16 * 1024 * 1024 {
+                if data.len() > ASSET_LIMIT {
                     return Err(invalid("Staging host limit 16 MiB"));
                 }
             }
@@ -338,23 +363,177 @@ pub fn sanitize_download(
     kind: DownloadKind,
     mut bytes: Vec<u8>,
 ) -> Result<Information> {
-    let expected = match kind {
-        DownloadKind::RoomDescriptor => Some(154),
-        DownloadKind::HeadphoneIdentifier => Some(116),
-        DownloadKind::UserMetadata => None,
-        DownloadKind::Log => None,
-    };
-    if expected.is_some_and(|n| bytes.len() != n) {
-        return Err(invalid("Download record size"));
-    }
-    if matches!(kind, DownloadKind::UserMetadata) {
-        UserMetadata::decode(&bytes)?;
-    }
-    if matches!(kind, DownloadKind::RoomDescriptor) {
-        bytes[..8].fill(0);
-        bytes[146..154].fill(0);
+    match kind {
+        DownloadKind::RoomDescriptor if bytes.len() == 154 => {
+            bytes[..8].fill(0);
+            bytes[146..154].fill(0);
+        }
+        DownloadKind::HeadphoneIdentifier if bytes.len() == 116 => {}
+        DownloadKind::UserMetadata => {
+            UserMetadata::decode(&bytes)?;
+        }
+        DownloadKind::Log => {}
+        _ => return Err(invalid("Download record size")),
     }
     Ok(Information(bytes))
+}
+/// The `09 type token` query for a processing result.
+fn processing_query(file_type: u8, token: u32) -> Vec<u8> {
+    let mut p = vec![9, file_type];
+    p.extend(token.to_le_bytes());
+    p
+}
+/// Where an upload starts: zero, or a checkpoint that matches the device's offer.
+fn resume_offset(
+    start: StartReply,
+    resume: Option<UploadCheckpoint>,
+    file_type: u8,
+    total: u32,
+) -> Result<u32> {
+    match resume {
+        Some(saved) => {
+            if !start.resume
+                || saved.file_type != file_type
+                || saved.total != total
+                || saved.token != start.token
+                || saved.offset > start.offset
+                || saved.offset >= total
+                || start.offset > total
+                || (file_type == 1 && saved.offset != start.offset)
+            {
+                return Err(invalid(
+                    "Resume identity/committed limit mismatch",
+                ));
+            }
+            Ok(saved.offset)
+        }
+        None if start.resume || start.offset != 0 => Err(unsupported(
+            "Device offers retained state; use resume_prepared with an explicit matching checkpoint",
+        )),
+        None => Ok(0),
+    }
+}
+/// Data bytes per upload slot at the negotiated packet size.
+fn upload_stride(packet_size: u16) -> Result<usize> {
+    let stride = packet_size
+        .checked_sub(UPLOAD_WIDTH.overhead())
+        .filter(|n| *n > 0)
+        .ok_or_else(|| invalid("Negotiated packet size"))?;
+    if packet_size > 4096 {
+        return Err(invalid("Negotiated frame exceeds bounded implementation"));
+    }
+    Ok(stride as usize)
+}
+/// The slots of one upload window and the range of the asset they cover.
+struct UploadWindow<'a> {
+    chunks: Vec<&'a [u8]>,
+    committed: u32,
+    end: u32,
+    last: bool,
+}
+impl UploadWindow<'_> {
+    fn mask(&self) -> u32 {
+        slot_mask(self.chunks.len() as u8)
+    }
+}
+/// A host ACK for a download step, in the extended frame the device expects.
+fn download_ack(selector: u8, flags: u8) -> [u8; 14] {
+    [0x5b, 2, 10, 0, 0x98, 0, selector, flags, 0, 0, 0, 0, 0, 0]
+}
+/// The slots of one download window, which can arrive in any order.
+struct DownloadWindow {
+    slots: Vec<Option<Vec<u8>>>,
+    /// The slot named by the end marker.
+    last: Option<usize>,
+    /// The frame width of this window's data, once one has arrived.
+    width: Option<FrameWidth>,
+    packet_size: usize,
+    /// Bytes of the asset still to come, this window included.
+    remaining: usize,
+}
+impl DownloadWindow {
+    fn new(info: &TransferInfo, received: usize) -> Self {
+        Self {
+            slots: vec![None; info.slots as usize],
+            last: None,
+            width: None,
+            packet_size: info.packet_size as usize,
+            remaining: info.total as usize - received,
+        }
+    }
+    fn stride(&self, width: FrameWidth) -> usize {
+        self.packet_size - width.overhead() as usize
+    }
+    fn accept(&mut self, frame: &Frame) -> Result<()> {
+        if frame.payload[0] == 4 {
+            self.accept_data(frame)
+        } else {
+            self.accept_end(&frame.payload)
+        }
+    }
+    fn accept_data(&mut self, frame: &Frame) -> Result<()> {
+        let width = FrameWidth::from_marker(frame.marker)?;
+        if self.width.is_some_and(|old| old != width) {
+            return Err(invalid("Mixed data widths in window"));
+        }
+        self.width = Some(width);
+        let p = &frame.payload;
+        let header = width.data_header();
+        if p.len() < header {
+            return Err(invalid("Download data header"));
+        }
+        let slot = (p[1] & 31) as usize;
+        let count = match width {
+            FrameWidth::Short => p[2] as usize,
+            FrameWidth::Extended => u16::from_le_bytes([p[2], p[3]]) as usize,
+        };
+        let stride = self.stride(width);
+        let expected = self.remaining.saturating_sub(slot * stride).min(stride);
+        if slot >= self.slots.len()
+            || count == 0
+            || count != expected
+            || p.len() != header + count
+        {
+            return Err(invalid("Download slot length/total bounds"));
+        }
+        match &self.slots[slot] {
+            Some(old) if old != &p[header..] => {
+                Err(invalid("Conflicting duplicate download slot"))
+            }
+            Some(_) => Ok(()),
+            None => {
+                self.slots[slot] = Some(p[header..].to_vec());
+                Ok(())
+            }
+        }
+    }
+    fn accept_end(&mut self, p: &[u8]) -> Result<()> {
+        if p.len() != 3 || p[1] != 128 || p[2] as usize >= self.slots.len() {
+            return Err(invalid("Download end marker"));
+        }
+        let slot = p[2] as usize;
+        if self.last.is_some_and(|old| old != slot) {
+            return Err(invalid("Conflicting end marker"));
+        }
+        self.last = Some(slot);
+        Ok(())
+    }
+    /// How many slots this window needs, and whether it is the asset's last.
+    fn extent(&self) -> (usize, bool) {
+        let stride = self.stride(self.width.unwrap_or(FrameWidth::Extended));
+        (
+            self.remaining.div_ceil(stride).min(self.slots.len()),
+            self.remaining <= stride * self.slots.len(),
+        )
+    }
+    /// Bitmap of the first `needed` slots that have not arrived.
+    fn missing(&self, needed: usize) -> u32 {
+        self.slots[..needed]
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.is_none())
+            .fold(0, |mask, (i, _)| mask | 1 << i)
+    }
 }
 impl<T: Read + Write> X4<T> {
     pub fn transfer_types(&mut self) -> Result<Vec<u8>> {
@@ -366,9 +545,7 @@ impl<T: Read + Write> X4<T> {
         file_type: u8,
         token: u32,
     ) -> Result<ProcessingResult> {
-        let mut p = vec![9, file_type];
-        p.extend(token.to_le_bytes());
-        let r = self.selector(0x98, &p)?;
+        let r = self.selector(0x98, &processing_query(file_type, token))?;
         ProcessingResult::decode(&r, file_type, token)
     }
     fn send_transfer(&mut self, width: FrameWidth, p: &[u8]) -> Result<()> {
@@ -390,6 +567,19 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(())
     }
+    /// Run one transfer exchange; a failure invalidates the session.
+    fn transfer<R>(
+        &mut self,
+        exchange: impl FnOnce(&mut Self) -> Result<R>,
+    ) -> Result<R> {
+        self.session.begin_transfer()?;
+        let result = exchange(self);
+        self.session.end_transfer();
+        if result.is_err() {
+            self.session.abort();
+        }
+        result
+    }
     /// Fresh prepared upload, bounded retries of explicitly missing slots only.
     /// Returns processing completion, never a claim that new acoustic filters activated.
     pub fn upload_prepared(
@@ -405,15 +595,7 @@ impl<T: Read + Write> X4<T> {
         asset: &PreparedUpload,
         policy: ProcessingPolicy,
     ) -> Result<UploadOutcome> {
-        policy.validate()?;
-        self.session.begin_transfer()?;
-        let result =
-            self.upload_prepared_inner(asset, policy, None, &mut |_| true);
-        self.session.end_transfer();
-        if result.is_err() {
-            self.session.usable = false;
-        }
-        result
+        self.upload(asset, policy, None, |_| true)
     }
     /// Resume the same prepared bytes from a previously confirmed committed
     /// offset. The device must offer the same token and at least that offset.
@@ -425,19 +607,7 @@ impl<T: Read + Write> X4<T> {
         checkpoint: UploadCheckpoint,
         policy: ProcessingPolicy,
     ) -> Result<UploadOutcome> {
-        policy.validate()?;
-        self.session.begin_transfer()?;
-        let result = self.upload_prepared_inner(
-            asset,
-            policy,
-            Some(checkpoint),
-            &mut |_| true,
-        );
-        self.session.end_transfer();
-        if result.is_err() {
-            self.session.abort();
-        }
-        result
+        self.upload(asset, policy, Some(checkpoint), |_| true)
     }
     /// Receive resumable checkpoints after setup and each acknowledged shift.
     /// Return false to cancel locally and invalidate the session. No wire cancel
@@ -446,19 +616,23 @@ impl<T: Read + Write> X4<T> {
         &mut self,
         asset: &PreparedUpload,
         policy: ProcessingPolicy,
+        progress: impl FnMut(UploadCheckpoint) -> bool,
+    ) -> Result<UploadOutcome> {
+        self.upload(asset, policy, None, progress)
+    }
+    fn upload(
+        &mut self,
+        asset: &PreparedUpload,
+        policy: ProcessingPolicy,
+        resume: Option<UploadCheckpoint>,
         mut progress: impl FnMut(UploadCheckpoint) -> bool,
     ) -> Result<UploadOutcome> {
         policy.validate()?;
-        self.session.begin_transfer()?;
-        let result =
-            self.upload_prepared_inner(asset, policy, None, &mut progress);
-        self.session.end_transfer();
-        if result.is_err() {
-            self.session.abort();
-        }
-        result
+        self.transfer(|x4| {
+            x4.upload_asset(asset, policy, resume, &mut progress)
+        })
     }
-    fn upload_prepared_inner(
+    fn upload_asset(
         &mut self,
         asset: &PreparedUpload,
         policy: ProcessingPolicy,
@@ -467,53 +641,19 @@ impl<T: Read + Write> X4<T> {
     ) -> Result<UploadOutcome> {
         let total = asset.data.len() as u32;
         let file_type = asset.kind.wire();
-        let mut p = vec![2];
-        p.extend(total.to_le_bytes());
-        p.push(file_type);
-        self.send_transfer(FrameWidth::Short, &p)?;
+        let request = TransferStart::Upload {
+            kind: asset.kind,
+            total,
+        }
+        .encode()?;
+        self.send_transfer(FrameWidth::Short, &request)?;
         let start = StartReply::decode(
             &self
                 .session
                 .continuation(0x98, |f| f.payload.first() == Some(&2))?,
         )?;
-        let offset = match resume {
-            Some(saved) => {
-                if !start.resume
-                    || saved.file_type != file_type
-                    || saved.total != total
-                    || saved.token != start.token
-                    || saved.offset > start.offset
-                    || saved.offset >= total
-                    || start.offset > total
-                    || (file_type == 1 && saved.offset != start.offset)
-                {
-                    return Err(invalid(
-                        "Resume identity/committed limit mismatch",
-                    ));
-                }
-                saved.offset
-            }
-            None if start.resume || start.offset != 0 => {
-                return Err(unsupported(
-                    "Device offers retained state; use resume_prepared with an explicit matching checkpoint",
-                ));
-            }
-            None => 0,
-        };
-        let width = FrameWidth::Extended;
-        let stride = start
-            .packet_size
-            .checked_sub(width.overhead())
-            .filter(|n| *n > 0)
-            .ok_or_else(|| invalid("Negotiated packet size"))?
-            as usize;
-        if start.packet_size > 4096
-            || (width == FrameWidth::Short && stride > 252)
-        {
-            return Err(invalid(
-                "Negotiated frame exceeds bounded implementation",
-            ));
-        }
+        let offset = resume_offset(start, resume, file_type, total)?;
+        let stride = upload_stride(start.packet_size)?;
         let info = TransferInfo {
             total,
             offset,
@@ -523,103 +663,111 @@ impl<T: Read + Write> X4<T> {
             packet_size: start.packet_size,
             crc: Some(crc32(0, &asset.data)),
         };
-        self.send_transfer(width, &info.encode()?)?;
+        self.send_transfer(UPLOAD_WIDTH, &info.encode()?)?;
         self.transfer_ack(3, None)?;
-        let checkpoint = |offset| UploadCheckpoint {
-            file_type,
-            total,
-            token: start.token,
-            offset,
+        let mut report = |offset| {
+            progress(UploadCheckpoint {
+                file_type,
+                total,
+                token: start.token,
+                offset,
+            })
+            .then_some(())
+            .ok_or_else(|| invalid("Upload cancelled locally"))
         };
-        if !progress(checkpoint(offset)) {
-            return Err(invalid("Upload cancelled locally"));
-        }
+        report(offset)?;
         let mut committed = offset as usize;
         while committed < asset.data.len() {
             let end = (committed + stride * start.slots as usize)
                 .min(asset.data.len());
-            let chunks: Vec<_> =
-                asset.data[committed..end].chunks(stride).collect();
-            for (i, c) in chunks.iter().enumerate() {
-                self.send_transfer(width, &data_payload(width, i as u8, c)?)?;
-            }
-            if end == asset.data.len() {
-                self.send_transfer(width, &[6, 128, (chunks.len() - 1) as u8])?;
-            }
-            let mut retries = 0;
-            loop {
-                let p = self
-                    .session
-                    .continuation(0x98, |f| f.payload.first() == Some(&4))?;
-                let reply = WindowReply::decode(&p, start.slots)?;
-                match reply.status {
-                    0x81 => {
-                        if reply.committed != committed as u32
-                            || reply.missing & slot_mask(chunks.len() as u8)
-                                == 0
-                        {
-                            return Err(invalid(
-                                "Recovery offset/bitmap mismatch",
-                            ));
-                        }
-                        if retries == 32 {
-                            return Err(unsupported(
-                                "Missing-slot retry budget exhausted; reconnect before explicit resume",
-                            ));
-                        }
-                        retries += 1;
-                        for (i, c) in chunks.iter().enumerate() {
-                            if reply.missing & (1 << i) != 0 {
-                                self.send_transfer(
-                                    width,
-                                    &data_payload(width, i as u8, c)?,
-                                )?;
-                            }
-                        }
-                        if end == asset.data.len() {
-                            self.send_transfer(
-                                width,
-                                &[6, 128, (chunks.len() - 1) as u8],
-                            )?;
-                        }
-                    }
-                    0x10 => return Ok(UploadOutcome::AlreadyPresent),
-                    0 => {
-                        if reply.committed != end as u32
-                            || reply.missing & slot_mask(chunks.len() as u8)
-                                != 0
-                        {
-                            return Err(invalid(
-                                "Window completion offset/bitmap mismatch",
-                            ));
-                        }
-                        break;
-                    }
-                    _ => {
-                        return Err(invalid(format!(
-                            "Transfer validator/window status {:02x}",
-                            reply.status
-                        )));
-                    }
-                }
+            let window = UploadWindow {
+                chunks: asset.data[committed..end].chunks(stride).collect(),
+                committed: committed as u32,
+                end: end as u32,
+                last: end == asset.data.len(),
+            };
+            self.send_slots(&window, u32::MAX)?;
+            if !self.confirm_window(&window, start.slots)? {
+                return Ok(UploadOutcome::AlreadyPresent);
             }
             let mut shift = vec![5];
-            shift.extend((end as u32).to_le_bytes());
-            self.send_transfer(width, &shift)?;
-            self.transfer_ack(5, Some(end as u32))?;
+            shift.extend(window.end.to_le_bytes());
+            self.send_transfer(UPLOAD_WIDTH, &shift)?;
+            self.transfer_ack(5, Some(window.end))?;
             committed = end;
-            if !progress(checkpoint(end as u32)) {
-                return Err(invalid("Upload cancelled locally"));
+            report(window.end)?;
+        }
+        let result = self.wait_processing(file_type, start.token, policy)?;
+        Ok(if file_type == 1 {
+            UploadOutcome::Staged(result)
+        } else {
+            UploadOutcome::Processed(result)
+        })
+    }
+    /// Send the slots set in `slots`, then the last window's end marker.
+    fn send_slots(
+        &mut self,
+        window: &UploadWindow<'_>,
+        slots: u32,
+    ) -> Result<()> {
+        for (i, chunk) in window.chunks.iter().enumerate() {
+            if slots & (1 << i) != 0 {
+                let payload = data_payload(UPLOAD_WIDTH, i as u8, chunk)?;
+                self.send_transfer(UPLOAD_WIDTH, &payload)?;
             }
         }
-        self.wait_processing(file_type, start.token, policy)
-            .map(|result| {
-                if file_type == 1 {
-                    UploadOutcome::Staged(result)
-                } else {
-                    UploadOutcome::Processed(result)
+        if window.last {
+            let last = (window.chunks.len() - 1) as u8;
+            self.send_transfer(UPLOAD_WIDTH, &[6, 128, last])?;
+        }
+        Ok(())
+    }
+    /// Wait for the device to take `window`, resending the slots it reports
+    /// missing. Returns false when the device already holds the asset.
+    fn confirm_window(
+        &mut self,
+        window: &UploadWindow<'_>,
+        slots: u8,
+    ) -> Result<bool> {
+        let mut retries = 0;
+        loop {
+            let p = self
+                .session
+                .continuation(0x98, |f| f.payload.first() == Some(&4))?;
+            let reply = WindowReply::decode(&p, slots)?;
+            match reply.status {
+                0x81 => {
+                    if reply.committed != window.committed
+                        || reply.missing & window.mask() == 0
+                    {
+                        return Err(invalid("Recovery offset/bitmap mismatch"));
+                    }
+                    if retries == UPLOAD_RETRIES {
+                        return Err(unsupported(
+                            "Missing-slot retry budget exhausted; reconnect before explicit resume",
+                        ));
+                    }
+                    retries += 1;
+                    self.send_slots(window, reply.missing)?;
                 }
-            })
+                0x10 => return Ok(false),
+                0 => {
+                    if reply.committed != window.end
+                        || reply.missing & window.mask() != 0
+                    {
+                        return Err(invalid(
+                            "Window completion offset/bitmap mismatch",
+                        ));
+                    }
+                    return Ok(true);
+                }
+                status => {
+                    return Err(invalid(format!(
+                        "Transfer validator/window status {status:02x}"
+                    )));
+                }
+            }
+        }
     }
     fn wait_processing(
         &mut self,
@@ -655,20 +803,17 @@ impl<T: Read + Write> X4<T> {
                         ProcessingStatus::Processing => {}
                     }
                 }
-                Err(e)
-                    if e.downcast_ref::<std::io::Error>().is_some_and(
-                        |e| e.kind() == std::io::ErrorKind::TimedOut,
-                    ) =>
-                {
+                Err(e) if e.is_timeout() => {
                     if Instant::now() >= deadline {
                         return Err(e);
                     }
-                    let mut query = vec![9, file_type];
-                    query.extend(token.to_le_bytes());
                     // Type01 staging sends an asynchronous success but does not
                     // populate the firmware's query cache on this path.
                     if file_type != 1 {
-                        self.send_transfer(FrameWidth::Short, &query)?;
+                        self.send_transfer(
+                            FrameWidth::Short,
+                            &processing_query(file_type, token),
+                        )?;
                     }
                 }
                 Err(e) => return Err(e),
@@ -678,13 +823,6 @@ impl<T: Read + Write> X4<T> {
             }
         }
     }
-    pub fn download_coefficients(&mut self) -> Result<Information> {
-        Err(unsupported(
-            "91/94 unsupported through this firmware download path; 93/95 export descriptors only",
-        ))
-    }
-}
-impl<T: Read + Write> X4<T> {
     /// Fresh multiwindow download with missing-slot recovery, at most 16 MiB.
     /// Host policy: 60 seconds overall, one second per recovery interval, ten retries.
     /// No partial data escapes. Both data frame markers are decoded.
@@ -693,21 +831,24 @@ impl<T: Read + Write> X4<T> {
         &mut self,
         kind: DownloadKind,
     ) -> Result<Information> {
-        self.session.begin_transfer()?;
-        let result = self.download_asset_inner(kind);
-        self.session.end_transfer();
-        if result.is_err() {
-            self.session.usable = false;
-        }
-        result
+        self.transfer(|x4| {
+            let info = x4.start_download(kind)?;
+            let mut data = Vec::with_capacity(info.total as usize);
+            let deadline = Instant::now() + DOWNLOAD_TIMEOUT;
+            while data.len() < info.total as usize {
+                x4.download_window(&info, &mut data, deadline)?;
+            }
+            if info.crc.is_some_and(|c| crc32(0, &data) != c) {
+                return Err(invalid("Download IEEE CRC32 mismatch"));
+            }
+            sanitize_download(kind, data)
+        })
     }
-    fn download_asset_inner(
-        &mut self,
-        kind: DownloadKind,
-    ) -> Result<Information> {
-        let w = FrameWidth::Extended;
+    /// Negotiate a download and acknowledge its parameters.
+    fn start_download(&mut self, kind: DownloadKind) -> Result<TransferInfo> {
         let file_type = kind.wire();
-        self.send_transfer(w, &[2, 0, 0, 0, 0, file_type])?;
+        let request = TransferStart::Download(kind).encode()?;
+        self.send_transfer(FrameWidth::Extended, &request)?;
         let ack = self
             .session
             .continuation(2, |f| f.payload.first() == Some(&0x98))?;
@@ -723,7 +864,7 @@ impl<T: Read + Write> X4<T> {
         }
         let mut start = vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 31];
         start.extend(packet.to_le_bytes());
-        self.send_transfer(w, &start)?;
+        self.send_transfer(FrameWidth::Extended, &start)?;
         let p = self
             .session
             .continuation(0x98, |f| f.payload.first() == Some(&3))?;
@@ -734,174 +875,104 @@ impl<T: Read + Write> X4<T> {
         if info.packet_size <= 8
             || info.packet_size > packet
             || info.total == 0
-            || info.total > 16 * 1024 * 1024
+            || info.total as usize > ASSET_LIMIT
         {
             return Err(unsupported(
                 "Download exceeds 16 MiB or negotiated packet bounds",
             ));
         }
         // ACK03 uses flags=1, ACK05 uses zero context, matching retained export capture.
-        self.session.transfer_send(&[
-            0x5b, 2, 10, 0, 0x98, 0, 3, 1, 0, 0, 0, 0, 0, 0,
-        ])?;
-        let mut data = Vec::with_capacity(info.total as usize);
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while data.len() < info.total as usize {
-            let mut slots: Vec<Option<Vec<u8>>> =
-                vec![None; info.slots as usize];
-            let mut last = None;
-            let mut width = None;
-            let mut retries = 0;
-            loop {
-                let until =
-                    deadline.min(Instant::now() + Duration::from_secs(1));
-                let received =
-                    self.session.continuation_frame_until(0x98, until, |f| {
-                        matches!(f.payload.first(), Some(4 | 6))
-                    });
-                let timed_out = match received {
-                    Ok(f) => {
-                        let p = &f.payload;
-                        if p[0] == 4 {
-                            let w = match f.marker {
-                                0x5a => FrameWidth::Short,
-                                0x5b => FrameWidth::Extended,
-                                _ => {
-                                    return Err(invalid("Unknown data marker"));
-                                }
-                            };
-                            if width.is_some_and(|old| old != w) {
-                                return Err(invalid(
-                                    "Mixed data widths in window",
-                                ));
-                            }
-                            width = Some(w);
-                            let header =
-                                if w == FrameWidth::Short { 3 } else { 4 };
-                            if p.len() < header {
-                                return Err(invalid("Download data header"));
-                            }
-                            let slot = (p[1] & 31) as usize;
-                            let count = if header == 3 {
-                                p[2] as usize
-                            } else {
-                                u16::from_le_bytes([p[2], p[3]]) as usize
-                            };
-                            let stride = info.packet_size as usize
-                                - w.overhead() as usize;
-                            let remaining = info.total as usize - data.len();
-                            let expected = remaining
-                                .saturating_sub(slot * stride)
-                                .min(stride);
-                            if slot >= slots.len()
-                                || count == 0
-                                || count != expected
-                                || p.len() != header + count
-                            {
-                                return Err(invalid(
-                                    "Download slot length/total bounds",
-                                ));
-                            }
-                            if let Some(old) = &slots[slot] {
-                                if old != &p[header..] {
-                                    return Err(invalid(
-                                        "Conflicting duplicate download slot",
-                                    ));
-                                }
-                            } else {
-                                slots[slot] = Some(p[header..].to_vec());
-                            }
-                        } else {
-                            if p.len() != 3
-                                || p[1] != 128
-                                || p[2] > 31
-                                || p[2] >= info.slots
-                            {
-                                return Err(invalid("Download end marker"));
-                            }
-                            if last.is_some_and(|old| old != p[2] as usize) {
-                                return Err(invalid("Conflicting end marker"));
-                            }
-                            last = Some(p[2] as usize);
-                        }
-                        false
-                    }
-                    Err(e)
-                        if e.downcast_ref::<std::io::Error>().is_some_and(
-                            |e| e.kind() == std::io::ErrorKind::TimedOut,
-                        ) =>
-                    {
-                        true
-                    }
-                    Err(e) => return Err(e),
-                };
-                if Instant::now() >= deadline {
-                    return Err(invalid("Download deadline"));
-                }
-                let stride = info.packet_size as usize
-                    - width.unwrap_or(w).overhead() as usize;
-                let remaining = info.total as usize - data.len();
-                let n = remaining.div_ceil(stride).min(slots.len());
-                let final_window = remaining <= stride * slots.len();
-                if last.is_some_and(|slot| !final_window || slot + 1 != n) {
-                    return Err(invalid("End marker disagrees with total"));
-                }
-                let missing =
-                    slots[..n].iter().enumerate().fold(0u32, |m, (i, s)| {
-                        m | if s.is_none() { 1 << i } else { 0 }
-                    });
-                let complete =
-                    missing == 0 && (!final_window || last.is_some());
-                if complete || timed_out || last.is_some() {
-                    if !complete {
-                        if retries == 10 {
-                            return Err(invalid(
-                                "Download recovery budget exhausted",
-                            ));
-                        }
-                        retries += 1;
-                    }
-                    let committed = if complete {
-                        data.len()
-                            + slots[..n]
-                                .iter()
-                                .flatten()
-                                .map(Vec::len)
-                                .sum::<usize>()
-                    } else {
-                        data.len()
-                    };
-                    let mut reply = vec![4, if complete { 0 } else { 0x81 }];
-                    reply.extend((missing | !slot_mask(n as u8)).to_le_bytes());
-                    reply.extend((committed as u32).to_le_bytes());
-                    self.send_transfer(w, &reply)?;
-                    if !complete {
-                        // A repeated marker triggers another response; ordinary recovered
-                        // data is collected until all required slots have arrived.
-                        last = None;
-                        continue;
-                    }
-                    let shift = self.session.continuation(0x98, |f| {
-                        f.payload.first() == Some(&5)
-                    })?;
-                    if shift.len() != 5 || word(&shift, 1) != committed as u32 {
-                        return Err(invalid("Download committed offset"));
-                    }
-                    self.session.transfer_send(&[
-                        0x5b, 2, 10, 0, 0x98, 0, 5, 0, 0, 0, 0, 0, 0, 0,
-                    ])?;
-                    for slot in slots.into_iter().take(n) {
-                        data.extend(slot.expect("complete window"));
-                    }
-                    break;
-                }
-            }
-        }
-        if info.crc.is_some_and(|c| crc32(0, &data) != c) {
-            return Err(invalid("Download IEEE CRC32 mismatch"));
-        }
-        sanitize_download(kind, data)
+        self.session.transfer_send(&download_ack(3, 1))?;
+        Ok(info)
     }
+    /// Collect one window into `data`, asking for whatever does not arrive.
+    fn download_window(
+        &mut self,
+        info: &TransferInfo,
+        data: &mut Vec<u8>,
+        deadline: Instant,
+    ) -> Result<()> {
+        let mut window = DownloadWindow::new(info, data.len());
+        let mut retries = 0;
+        loop {
+            let until = deadline.min(Instant::now() + DOWNLOAD_POLL);
+            let received =
+                self.session.continuation_frame_until(0x98, until, |f| {
+                    matches!(f.payload.first(), Some(4 | 6))
+                });
+            let timed_out = match received {
+                Ok(frame) => {
+                    window.accept(&frame)?;
+                    false
+                }
+                Err(e) if e.is_timeout() => true,
+                Err(e) => return Err(e),
+            };
+            if Instant::now() >= deadline {
+                return Err(invalid("Download deadline"));
+            }
+            let (needed, final_window) = window.extent();
+            if window
+                .last
+                .is_some_and(|slot| !final_window || slot + 1 != needed)
+            {
+                return Err(invalid("End marker disagrees with total"));
+            }
+            let missing = window.missing(needed);
+            let complete =
+                missing == 0 && (!final_window || window.last.is_some());
+            if !complete && !timed_out && window.last.is_none() {
+                continue;
+            }
+            if !complete {
+                if retries == DOWNLOAD_RETRIES {
+                    return Err(invalid("Download recovery budget exhausted"));
+                }
+                retries += 1;
+            }
+            let held = window.slots[..needed].iter().flatten().map(Vec::len);
+            let committed =
+                data.len() + if complete { held.sum::<usize>() } else { 0 };
+            let mut reply = vec![4, if complete { 0 } else { 0x81 }];
+            reply.extend((missing | !slot_mask(needed as u8)).to_le_bytes());
+            reply.extend((committed as u32).to_le_bytes());
+            self.send_transfer(FrameWidth::Extended, &reply)?;
+            if !complete {
+                // A repeated marker triggers another response; ordinary recovered
+                // data is collected until all required slots have arrived.
+                window.last = None;
+                continue;
+            }
+            let shift = self
+                .session
+                .continuation(0x98, |f| f.payload.first() == Some(&5))?;
+            if shift.len() != 5 || word(&shift, 1) != committed as u32 {
+                return Err(invalid("Download committed offset"));
+            }
+            self.session.transfer_send(&download_ack(5, 0))?;
+            data.extend(
+                window.slots.into_iter().take(needed).flatten().flatten(),
+            );
+            return Ok(());
+        }
+    }
+}
+fn push_string(p: &mut Vec<u8>, s: &[u8]) -> Result<()> {
+    if s.contains(&0) {
+        return Err(invalid("Metadata string contains NUL"));
+    }
+    p.extend(s);
+    p.push(0);
+    Ok(())
+}
+fn read_string(p: &[u8], pos: &mut usize) -> Result<Vec<u8>> {
+    let n = p[*pos..]
+        .iter()
+        .position(|x| *x == 0)
+        .ok_or_else(|| invalid("Unterminated metadata string"))?;
+    let s = p[*pos..*pos + n].to_vec();
+    *pos += n + 1;
+    Ok(s)
 }
 /// User-profile metadata, not acoustic coefficients. Private fields are never Debug logged.
 pub struct UserMetadata {
@@ -914,19 +985,11 @@ pub struct UserMetadata {
 impl UserMetadata {
     pub fn encode(&self) -> Result<Vec<u8>> {
         let mut p = vec![0; 4];
-        fn string(p: &mut Vec<u8>, s: &[u8]) -> Result<()> {
-            if s.contains(&0) {
-                return Err(invalid("Metadata string contains NUL"));
-            }
-            p.extend(s);
-            p.push(0);
-            Ok(())
-        }
-        string(&mut p, &self.user_id)?;
-        string(&mut p, &self.description)?;
+        push_string(&mut p, &self.user_id)?;
+        push_string(&mut p, &self.description)?;
         p.extend(self.timestamp.to_le_bytes());
-        string(&mut p, &self.parent_profile_id)?;
-        string(&mut p, &self.generation)?;
+        push_string(&mut p, &self.parent_profile_id)?;
+        push_string(&mut p, &self.generation)?;
         if p.len() > 512 {
             return Err(invalid("Metadata exceeds 512 bytes"));
         }
@@ -938,25 +1001,17 @@ impl UserMetadata {
         if p.len() < 16 || p.len() > 512 || word(p, 0) as usize != p.len() {
             return Err(invalid("Metadata total length"));
         }
-        fn string(p: &[u8], pos: &mut usize) -> Result<Vec<u8>> {
-            let n = p[*pos..]
-                .iter()
-                .position(|x| *x == 0)
-                .ok_or_else(|| invalid("Unterminated metadata string"))?;
-            let s = p[*pos..*pos + n].to_vec();
-            *pos += n + 1;
-            Ok(s)
-        }
         let mut pos = 4;
-        let user_id = string(p, &mut pos)?;
-        let description = string(p, &mut pos)?;
-        if p.len() - pos < 8 {
-            return Err(invalid("Truncated metadata timestamp"));
-        }
-        let timestamp = u64::from_le_bytes(p[pos..pos + 8].try_into()?);
+        let user_id = read_string(p, &mut pos)?;
+        let description = read_string(p, &mut pos)?;
+        let timestamp = p[pos..]
+            .first_chunk()
+            .copied()
+            .map(u64::from_le_bytes)
+            .ok_or_else(|| invalid("Truncated metadata timestamp"))?;
         pos += 8;
-        let parent_profile_id = string(p, &mut pos)?;
-        let generation = string(p, &mut pos)?;
+        let parent_profile_id = read_string(p, &mut pos)?;
+        let generation = read_string(p, &mut pos)?;
         if pos != p.len() {
             return Err(invalid("Metadata trailing bytes"));
         }
@@ -994,7 +1049,7 @@ impl RoomDescriptor {
         }
         Ok(Self {
             identifier: Information(p[8..40].to_vec()),
-            mode: p[40..50].try_into()?,
+            mode: std::array::from_fn(|i| p[40 + i]),
             field_32: Information(p[50..114].to_vec()),
             field_72: Information(p[114..146].to_vec()),
         })

@@ -18,7 +18,27 @@ const FLAT_DB: f32 = 0.05;
 
 /// A smooth line through the ten band gains, not a measured frequency response.
 /// Each point is centred in a tenth of the width, directly above its fader.
-pub struct Curve(pub [f32; 10], pub bool);
+pub struct Curve {
+    pub bands: [f32; 10],
+    /// Drawn in the accent color when the EQ is in effect.
+    pub active: bool,
+}
+
+/// Where bands and gains land on a canvas of a given size.
+#[derive(Clone, Copy)]
+struct Plot(Rectangle);
+impl Plot {
+    fn x(self, band: f32) -> f32 {
+        (band + 0.5) / 10.0 * self.0.width
+    }
+    fn y(self, db: f32) -> f32 {
+        TOP + (12.0 - db) / 24.0 * (self.0.height - TOP - BOTTOM)
+    }
+    /// The height of `db` on screen, as opposed to its position.
+    fn pixels(self, db: f32) -> f32 {
+        db / 24.0 * (self.0.height - TOP - BOTTOM)
+    }
+}
 
 /// Slope at each band, in dB per band, by Fritsch-Carlson monotone interpolation.
 /// Unlike a plain spline, the line never rises above or dips below the gains
@@ -58,127 +78,58 @@ fn text(content: impl Into<String>, position: Point, tint: Color) -> Text {
     }
 }
 
-impl<Message> canvas::Program<Message> for Curve {
-    type State = ();
-    fn draw(
-        &self,
-        _: &(),
-        renderer: &Renderer,
-        _: &Theme,
-        bounds: Rectangle,
-        _: mouse::Cursor,
-    ) -> Vec<Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        let y =
-            |db: f32| TOP + (12.0 - db) / 24.0 * (bounds.height - TOP - BOTTOM);
-        let x = |band: f32| (band + 0.5) / 10.0 * bounds.width;
-        let tint = if self.1 { color::PRIMARY } else { color::MUTED };
-        let (left, right) = (x(0.0), x(9.0));
-
-        let point = |band: usize| Point::new(x(band as f32), y(self.0[band]));
-        let slopes = slopes(&self.0);
-        let step = x(1.0) - x(0.0);
-        // Cubic segments in pixels; a slope of one band's rise spans a third of it.
-        let trace = |builder: &mut canvas::path::Builder| {
-            for band in 0..9 {
-                let (from, to) = (point(band), point(band + 1));
-                let pixels =
-                    |db: f32| db / 24.0 * (bounds.height - TOP - BOTTOM);
-                builder.bezier_curve_to(
-                    Point::new(
-                        from.x + step / 3.0,
-                        from.y - pixels(slopes[band]) / 3.0,
-                    ),
-                    Point::new(
-                        to.x - step / 3.0,
-                        to.y + pixels(slopes[band + 1]) / 3.0,
-                    ),
-                    to,
-                );
-            }
-        };
-        // Strongest at the extremes and gone at 0 dB, so boosts and cuts both read.
-        // Opaque on purpose: with MSAA on, an RX 9060 XT draws translucent gradient
-        // stops with a hard step at one alpha value. The grid goes on top instead.
+impl Curve {
+    fn point(&self, plot: Plot, band: u8) -> Point {
+        Point::new(
+            plot.x(f32::from(band)),
+            plot.y(self.bands[usize::from(band)]),
+        )
+    }
+    /// Cubic segments in pixels; a slope of one band's rise spans a third of it.
+    fn trace(&self, plot: Plot, builder: &mut canvas::path::Builder) {
+        let slopes = slopes(&self.bands);
+        let step = plot.x(1.0) - plot.x(0.0);
+        for band in 0..9 {
+            let (from, to) =
+                (self.point(plot, band), self.point(plot, band + 1));
+            let (start, end) =
+                (slopes[usize::from(band)], slopes[usize::from(band) + 1]);
+            builder.bezier_curve_to(
+                Point::new(
+                    from.x + step / 3.0,
+                    from.y - plot.pixels(start) / 3.0,
+                ),
+                Point::new(to.x - step / 3.0, to.y + plot.pixels(end) / 3.0),
+                to,
+            );
+        }
+    }
+    /// Strongest at the extremes and gone at 0 dB, so boosts and cuts both read.
+    /// Opaque on purpose: with MSAA on, an RX 9060 XT draws translucent gradient
+    /// stops with a hard step at one alpha value. The grid goes on top instead.
+    fn draw_fill(&self, frame: &mut Frame, plot: Plot, tint: Color) {
         let fade = gradient::Linear::new(
-            Point::new(0.0, y(12.0)),
-            Point::new(0.0, y(-12.0)),
+            Point::new(0.0, plot.y(12.0)),
+            Point::new(0.0, plot.y(-12.0)),
         )
         .add_stop(0.0, over_panel(tint, 0.34))
         .add_stop(0.5, over_panel(tint, 0.02))
         .add_stop(1.0, over_panel(tint, 0.34));
         frame.fill(
             &Path::new(|p| {
-                p.move_to(Point::new(left, y(0.0)));
-                p.line_to(point(0));
-                trace(p);
-                p.line_to(Point::new(right, y(0.0)));
+                p.move_to(Point::new(plot.x(0.0), plot.y(0.0)));
+                p.line_to(self.point(plot, 0));
+                self.trace(plot, p);
+                p.line_to(Point::new(plot.x(9.0), plot.y(0.0)));
                 p.close();
             }),
             fade,
         );
-
-        for (label, band) in [("Bass", 1.0), ("Midrange", 4.5), ("Treble", 8.0)]
-        {
-            frame.fill_text(Text {
-                size: 11.0.into(),
-                font: font::MEDIUM,
-                align_x: alignment::Horizontal::Center.into(),
-                ..text(label, Point::new(x(band), 0.0), color::LABEL)
-            });
-        }
-        for band in [2.5, 6.5] {
-            frame.stroke(
-                &Path::line(
-                    Point::new(x(band), y(12.0)),
-                    Point::new(x(band), y(-12.0)),
-                ),
-                Stroke {
-                    line_dash: DASH,
-                    ..Stroke::default().with_color(color::HAIRLINE)
-                },
-            );
-        }
-        let label_x = left - 7.0;
-        frame.fill_text(Text {
-            align_x: alignment::Horizontal::Right.into(),
-            ..text("dB", Point::new(label_x, 1.0), color::LABEL)
-        });
-        for (db, label) in [
-            (12.0, "+12"),
-            (6.0, "+6"),
-            (0.0, "0"),
-            (-6.0, "−6"),
-            (-12.0, "−12"),
-        ] {
-            let line =
-                Path::line(Point::new(left, y(db)), Point::new(right, y(db)));
-            let stroke = Stroke::default().with_color(if db == 0.0 {
-                color::MUTED.scale_alpha(0.35)
-            } else {
-                color::HAIRLINE
-            });
-            frame.stroke(
-                &line,
-                if db == 6.0 || db == -6.0 {
-                    Stroke {
-                        line_dash: DASH,
-                        ..stroke
-                    }
-                } else {
-                    stroke
-                },
-            );
-            frame.fill_text(Text {
-                align_x: alignment::Horizontal::Right.into(),
-                align_y: alignment::Vertical::Center,
-                ..text(label, Point::new(label_x, y(db)), color::LABEL)
-            });
-        }
-
+    }
+    fn draw_line(&self, frame: &mut Frame, plot: Plot, tint: Color) {
         let curve = Path::new(|p| {
-            p.move_to(point(0));
-            trace(p);
+            p.move_to(self.point(plot, 0));
+            self.trace(plot, p);
         });
         let line = Stroke {
             line_cap: LineCap::Round,
@@ -190,9 +141,10 @@ impl<Message> canvas::Program<Message> for Curve {
             line.with_width(6.0).with_color(tint.scale_alpha(0.16)),
         );
         frame.stroke(&curve, line.with_width(2.0).with_color(tint));
-
-        for (band, gain) in self.0.iter().enumerate() {
-            let center = point(band);
+    }
+    fn draw_markers(&self, frame: &mut Frame, plot: Plot, tint: Color) {
+        for (band, gain) in (0..).zip(self.bands) {
+            let center = self.point(plot, band);
             if gain.abs() < FLAT_DB {
                 frame.fill(&Path::circle(center, 2.0), tint.scale_alpha(0.6));
             } else {
@@ -200,6 +152,91 @@ impl<Message> canvas::Program<Message> for Curve {
                 frame.fill(&Path::circle(center, 3.5), tint);
             }
         }
+    }
+}
+
+/// Region labels and dividers, then the dB scale and its lines.
+fn draw_grid(frame: &mut Frame, plot: Plot) {
+    for (label, band) in [("Bass", 1.0), ("Midrange", 4.5), ("Treble", 8.0)] {
+        frame.fill_text(Text {
+            size: 11.0.into(),
+            font: font::MEDIUM,
+            align_x: alignment::Horizontal::Center.into(),
+            ..text(label, Point::new(plot.x(band), 0.0), color::LABEL)
+        });
+    }
+    for band in [2.5, 6.5] {
+        frame.stroke(
+            &Path::line(
+                Point::new(plot.x(band), plot.y(12.0)),
+                Point::new(plot.x(band), plot.y(-12.0)),
+            ),
+            Stroke {
+                line_dash: DASH,
+                ..Stroke::default().with_color(color::HAIRLINE)
+            },
+        );
+    }
+    let (left, right) = (plot.x(0.0), plot.x(9.0));
+    let label_x = left - 7.0;
+    frame.fill_text(Text {
+        align_x: alignment::Horizontal::Right.into(),
+        ..text("dB", Point::new(label_x, 1.0), color::LABEL)
+    });
+    for (db, label, dashed) in [
+        (12.0, "+12", false),
+        (6.0, "+6", true),
+        (0.0, "0", false),
+        (-6.0, "−6", true),
+        (-12.0, "−12", false),
+    ] {
+        let y = plot.y(db);
+        let tint = if label == "0" {
+            color::MUTED.scale_alpha(0.35)
+        } else {
+            color::HAIRLINE
+        };
+        let stroke = Stroke::default().with_color(tint);
+        frame.stroke(
+            &Path::line(Point::new(left, y), Point::new(right, y)),
+            if dashed {
+                Stroke {
+                    line_dash: DASH,
+                    ..stroke
+                }
+            } else {
+                stroke
+            },
+        );
+        frame.fill_text(Text {
+            align_x: alignment::Horizontal::Right.into(),
+            align_y: alignment::Vertical::Center,
+            ..text(label, Point::new(label_x, y), color::LABEL)
+        });
+    }
+}
+
+impl<Message> canvas::Program<Message> for Curve {
+    type State = ();
+    fn draw(
+        &self,
+        (): &(),
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let plot = Plot(bounds);
+        let tint = if self.active {
+            color::PRIMARY
+        } else {
+            color::MUTED
+        };
+        self.draw_fill(&mut frame, plot, tint);
+        draw_grid(&mut frame, plot);
+        self.draw_line(&mut frame, plot, tint);
+        self.draw_markers(&mut frame, plot, tint);
         vec![frame.into_geometry()]
     }
 }
@@ -209,15 +246,16 @@ mod tests {
     use super::*;
 
     /// A point on the segment after `band`, `t` of the way along, in dB.
-    fn sample(gains: &[f32; 10], band: usize, t: f32) -> f32 {
+    fn sample(gains: &[f32; 10], band: usize, along: f32) -> f32 {
         let slopes = slopes(gains);
-        let (a, b) = (gains[band], gains[band + 1]);
-        let (c, d) = (a + slopes[band] / 3.0, b - slopes[band + 1] / 3.0);
-        let u = 1.0 - t;
-        u * u * u * a
-            + 3.0 * u * u * t * c
-            + 3.0 * u * t * t * d
-            + t * t * t * b
+        let (start, end) = (gains[band], gains[band + 1]);
+        let first = start + slopes[band] / 3.0;
+        let second = end - slopes[band + 1] / 3.0;
+        let rest = 1.0 - along;
+        rest * rest * rest * start
+            + 3.0 * rest * rest * along * first
+            + 3.0 * rest * along * along * second
+            + along * along * along * end
     }
 
     #[test]
@@ -233,8 +271,8 @@ mod tests {
             for band in 0..9 {
                 let low = gains[band].min(gains[band + 1]) - 1e-3;
                 let high = gains[band].max(gains[band + 1]) + 1e-3;
-                for step in 0..=20 {
-                    let db = sample(&gains, band, step as f32 / 20.0);
+                for step in 0..=20_u8 {
+                    let db = sample(&gains, band, f32::from(step) / 20.0);
                     assert!((low..=high).contains(&db), "{db} at band {band}");
                 }
             }

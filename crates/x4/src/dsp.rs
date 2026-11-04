@@ -2,7 +2,8 @@
 //! Command `14` (alternate DSP write) is rejected by X4 firmware and not exposed.
 use crate::{
     Output, X4,
-    protocol::{Result, invalid},
+    error::{Result, invalid},
+    protocol::word,
 };
 use std::io::{Read, Write};
 /// Command17 flags bits1..3: speaker=0, headphone=1, current=7.
@@ -70,15 +71,42 @@ pub fn decode_fragment(p: &[u8]) -> Result<(bool, Vec<DspValue>)> {
             .as_chunks::<6>()
             .0
             .iter()
-            .map(|x| DspValue {
+            .map(|tuple| DspValue {
                 parameter: Parameter {
-                    module: x[0],
-                    parameter: x[1],
+                    module: tuple[0],
+                    parameter: tuple[1],
                 },
-                bits: u32::from_le_bytes(x[2..6].try_into().unwrap()),
+                bits: word(tuple, 2),
             })
             .collect(),
     ))
+}
+#[derive(Debug, Clone, Copy)]
+pub enum ProfileField {
+    Name,
+    Auxiliary,
+}
+impl ProfileField {
+    /// Maximum characters (two wire bytes each).
+    fn limit(self) -> usize {
+        match self {
+            Self::Name => 32,
+            Self::Auxiliary => 8,
+        }
+    }
+    /// Command `18` selector for (write, read, info).
+    fn selectors(self) -> (u8, u8, u8) {
+        match self {
+            Self::Name => (0, 1, 2),
+            Self::Auxiliary => (3, 4, 5),
+        }
+    }
+}
+pub(crate) fn check_profile_index(index: u8) -> Result<()> {
+    if index > 3 {
+        return Err(invalid("Profile index outside 0..3"));
+    }
+    Ok(())
 }
 impl<T: Read + Write> X4<T> {
     /// `11 count,(module,param)*` reads current values; `alternate=true` uses
@@ -146,9 +174,7 @@ impl<T: Read + Write> X4<T> {
         if p[..4] != [0, 1, 0x96, 0x0b] {
             return Err(invalid("DSP range identity"));
         }
-        Ok(std::array::from_fn(|i| {
-            f32::from_le_bytes(p[4 + i * 4..8 + i * 4].try_into().unwrap())
-        }))
+        Ok(std::array::from_fn(|i| f32::from_bits(word(&p, 4 + i * 4))))
     }
     /// Firmware stored profile bytes, independent of app preset names.
     pub fn write_profile_data(
@@ -183,35 +209,6 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(())
     }
-}
-#[derive(Debug, Clone, Copy)]
-pub enum ProfileField {
-    Name,
-    Auxiliary,
-}
-impl ProfileField {
-    /// Maximum characters (two wire bytes each).
-    fn limit(self) -> usize {
-        match self {
-            Self::Name => 32,
-            Self::Auxiliary => 8,
-        }
-    }
-    /// Command `18` selector for (write, read, info).
-    fn selectors(self) -> (u8, u8, u8) {
-        match self {
-            Self::Name => (0, 1, 2),
-            Self::Auxiliary => (3, 4, 5),
-        }
-    }
-}
-fn check_profile_index(index: u8) -> Result<()> {
-    if index > 3 {
-        return Err(invalid("Profile index outside 0..3"));
-    }
-    Ok(())
-}
-impl<T: Read + Write> X4<T> {
     pub fn profile_field_info(
         &mut self,
         index: u8,
@@ -260,32 +257,33 @@ impl<T: Read + Write> X4<T> {
         Err(invalid("Too many field blocks"))
     }
     /// Header: selector,02,index,total|more,count,offset, then two-byte characters.
-    /// Legacy argument names: block is total|more, total is count, count is offset.
     /// Nonfinal ACK80 retains bytes and is expected, not rollback. Both banks change.
     pub fn write_profile_field_block(
         &mut self,
         index: u8,
         field: ProfileField,
-        block: u8,
-        total: u8,
+        total_more: u8,
         count: u8,
+        offset: u8,
         data: &[u8],
     ) -> Result<()> {
         check_profile_index(index)?;
-        if (block & 127) as usize > field.limit()
-            || count as usize + total as usize > (block & 127) as usize
-            || data.len() != total as usize * 2
+        let total = (total_more & 127) as usize;
+        if total > field.limit()
+            || offset as usize + count as usize > total
+            || data.len() != count as usize * 2
             || data.as_chunks::<2>().0.iter().any(|c| c[1] != 0)
         {
             return Err(invalid("Profile field bounds or non-byte character"));
         }
-        let mut p = vec![field.selectors().0, 2, index, block, total, count];
+        let mut p =
+            vec![field.selectors().0, 2, index, total_more, count, offset];
         p.extend(data);
         self.session.prepare(0x18, &p)?;
         let reply = self
             .session
             .wait(|f| f.command == 2 && f.payload.first() == Some(&0x18))?;
-        let expected = if block & 128 != 0 { 0x80 } else { 0 };
+        let expected = total_more & 128;
         if reply.payload.len() != 10 || reply.payload[1] != expected {
             self.session.abort();
             return Err(invalid("Profile field acknowledgement"));

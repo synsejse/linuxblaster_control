@@ -52,9 +52,10 @@ the API's deadlines to work.
 - **Notifications.** Unsolicited frames, such as hardware knob changes, collect
   in `session.notifications` (at most 128) and are never mistaken for replies.
 
-Errors are `Box<dyn Error + Send + Sync>` (`soundblaster_x4::Error`). Timeouts
-are `io::ErrorKind::TimedOut`, protocol and validation failures `InvalidData`,
-and missing firmware support `Unsupported`.
+Errors are the `soundblaster_x4::Error` enum: `Invalid` for protocol and
+validation failures, `Unsupported` for missing firmware support, `Timeout` when
+the device does not answer, and `Io` and `Serial` for transport failures.
+`Error::is_timeout` also covers a transport that timed out.
 
 ## API overview
 
@@ -63,7 +64,7 @@ and missing firmware support `Unsupported`.
 | State | `state`, `output`, `features`, `feature`, `feature_support` | live |
 | Output | `set_output` | live |
 | Feature bits | `set_feature(Feature, bool)` — Direct Mode, headphone high gain, … | live (Direct Mode, gain) |
-| Hardware EQ | `eq`, `eq_parameter`, `apply_eq`, `Equalizer`, `Preset` | live |
+| Hardware EQ | `eq`, `eq_parameter`, `apply_eq`, `Equalizer` | live |
 | EQ slots | `eq_profiles`, `active_eq_profile`, `set_eq_profile`, `stored_eq_profile`, `read_eq_profile` | live |
 | Super X-Fi | `sxfi`, `set_sxfi(SxfiMode)` | live |
 | Mixer | `mixer`, `set_mixer_level`, `set_mixer_mute`, `mixer_channels`, `set_mixer_channel_raw`, `capture_mixer_channels`, `restore_mixer_channels` | live |

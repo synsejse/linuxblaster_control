@@ -1,6 +1,8 @@
 mod app;
 mod curve;
+use serde_json::{Map, Value, json};
 use soundblaster_x4::{Output, open};
+use std::error::Error;
 
 const USAGE: &str = "Linuxblaster Control — Sound Blaster X4
 Usage: linuxblaster_control [--port /dev/serial/by-id/...] [--status | --profiles]
@@ -9,22 +11,23 @@ Without a query option, opens the GUI. --demo opens an offline preview (no devic
 Queries may unlock the control channel but do not change audio settings.
 Only one controller can own the X4 serial connection at a time.";
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Query {
+    Status,
+    Profiles,
+}
+
+#[derive(Debug, Default, PartialEq)]
 struct Options {
     port: Option<String>,
-    query: Option<String>,
+    query: Option<Query>,
     help: bool,
     demo: bool,
 }
 fn parse_args(
     mut args: impl Iterator<Item = String>,
 ) -> Result<Options, String> {
-    let mut options = Options {
-        port: None,
-        query: None,
-        help: false,
-        demo: false,
-    };
+    let mut options = Options::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--demo" => options.demo = true,
@@ -34,10 +37,13 @@ fn parse_args(
                     args.next()
                         .filter(|s| !s.starts_with('-'))
                         .ok_or("--port requires a path")?,
-                )
+                );
             }
-            "--status" | "--profiles" if options.query.is_none() => {
-                options.query = Some(arg)
+            "--status" if options.query.is_none() => {
+                options.query = Some(Query::Status);
+            }
+            "--profiles" if options.query.is_none() => {
+                options.query = Some(Query::Profiles);
             }
             _ => return Err(format!("Unknown or conflicting argument: {arg}")),
         }
@@ -47,46 +53,34 @@ fn parse_args(
     }
     Ok(options)
 }
-fn run() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-    let options = parse_args(std::env::args().skip(1))?;
-    if options.help {
-        println!("{USAGE}");
-        return Ok(());
-    }
-    if let Some(query) = options.query {
-        let mut device =
-            open(options.port.as_deref()).map_err(|e| e.to_string())?;
-        let value = if query == "--status" {
-            serde_json::to_value(device.state().map_err(|e| e.to_string())?)?
-        } else {
-            let mut outputs = serde_json::Map::new();
+/// Read the device and print the answer to `query` as JSON.
+fn print_query(query: Query, port: Option<&str>) -> Result<(), Box<dyn Error>> {
+    let mut device = open(port)?;
+    let value = match query {
+        Query::Status => serde_json::to_value(device.state()?)?,
+        Query::Profiles => {
+            let mut outputs = Map::new();
             for (name, output) in [
                 ("speaker", Output::Speaker),
                 ("headphone", Output::Headphone),
             ] {
                 let mut profiles = Vec::new();
-                for info in
-                    device.eq_profiles(output).map_err(|e| e.to_string())?
-                {
-                    let eq = device
-                        .stored_eq_profile(output, info.index)
-                        .map_err(|e| e.to_string())?;
-                    profiles.push(serde_json::json!({"index":info.index,"name":info.name,"eq":eq}));
+                for info in device.eq_profiles(output)? {
+                    let eq = device.stored_eq_profile(output, info.index)?;
+                    profiles.push(
+                        json!({"index":info.index,"name":info.name,"eq":eq}),
+                    );
                 }
-                outputs.insert(name.into(), serde_json::Value::Array(profiles));
+                outputs.insert(name.into(), Value::Array(profiles));
             }
-            serde_json::Value::Object(outputs)
-        };
-        println!("{}", serde_json::to_string_pretty(&value)?);
-        return Ok(());
-    }
-    let icon = image::load_from_memory(include_bytes!(
-        "../../../packaging/linuxblaster-control.png"
-    ))?
-    .into_rgba8();
+            Value::Object(outputs)
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+fn run_gui(options: Options) -> Result<(), Box<dyn Error>> {
+    let icon = app::icon();
     let (width, height) = icon.dimensions();
     let icon = iced::window::icon::from_rgba(icon.into_raw(), width, height)?;
     iced::application(
@@ -119,6 +113,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     .run()?;
     Ok(())
 }
+fn run() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+    let options = parse_args(std::env::args().skip(1))?;
+    if options.help {
+        println!("{USAGE}");
+        return Ok(());
+    }
+    match options.query {
+        Some(query) => print_query(query, options.port.as_deref()),
+        None => run_gui(options),
+    }
+}
 fn main() {
     if let Err(error) = run() {
         eprintln!("{error}");
@@ -131,7 +139,7 @@ mod tests {
     #[test]
     fn cli_rejects_conflicts_and_missing_port() {
         let parse =
-            |args: &[&str]| parse_args(args.iter().map(|s| s.to_string()));
+            |args: &[&str]| parse_args(args.iter().map(ToString::to_string));
         assert!(parse(&["--demo", "--status"]).is_err());
         assert!(parse(&["--demo", "--port", "/dev/ttyACM0"]).is_err());
         assert!(parse(&["--demo"]).unwrap().demo);

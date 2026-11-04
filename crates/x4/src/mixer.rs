@@ -5,14 +5,14 @@
 //! steps with clipping; full-channel restoration writes masters first.
 use crate::{
     X4,
-    protocol::{Result, invalid},
+    error::{Result, invalid, unsupported},
 };
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
+/// Presentation grouping inferred from the descriptor's low-six-bit control type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-/// Presentation grouping inferred from the descriptor's low-six-bit control type.
 pub enum MixerGroup {
     Playback,
     Monitoring,
@@ -20,9 +20,9 @@ pub enum MixerGroup {
     Other,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// Advertised signed Q8.8 min/max and unsigned Q8.8 step, also expressed in dB.
 /// Firmware quantization does not necessarily follow a `min + N * step` grid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MixerRange {
     pub min_db: f32,
     pub max_db: f32,
@@ -55,10 +55,10 @@ impl MixerRange {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// One advertised control and its explicit master level/flag readback.
 /// Descriptor bits: type `003f`, volume `0040`, flag `0080`, dB `0800`;
 /// the upper nibble counts physical channels (plus one master).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MixerControl {
     pub index: u8,
     pub name: String,
@@ -83,6 +83,11 @@ impl MixerControl {
     pub fn is_microphone_boost(&self) -> bool {
         self.kind() == KIND_MICROPHONE_BOOST
     }
+    /// Whether this control has a mute that works: tested firmware ACKs
+    /// playback S/PDIF mute without changing its state.
+    pub fn mute_available(&self) -> bool {
+        self.muted.is_some() && self.kind() != KIND_SPDIF_PLAYBACK
+    }
 }
 
 const DESCRIPTOR_KIND: u16 = 0x3f;
@@ -91,15 +96,17 @@ const DESCRIPTOR_FLAG: u16 = 0x80;
 const DESCRIPTOR_DB: u16 = 0x800;
 /// Descriptor type of the Microphone Boost flag control.
 const KIND_MICROPHONE_BOOST: u16 = 63;
+/// Descriptor type of playback S/PDIF. Other S/PDIF controls have their own.
+const KIND_SPDIF_PLAYBACK: u16 = 14;
 /// Volume controls `0..10` have explicit channels; see [`channel_count`].
 const VOLUME_CONTROLS: u8 = 10;
 
 fn identity(kind: u16) -> (String, MixerGroup) {
-    use MixerGroup::*;
+    use MixerGroup::{Monitoring, Other, Playback, Recording};
     let (name, group) = match kind {
         1 => ("Speakers", Playback),
         2 => ("Headphones", Playback),
-        14 => ("S/PDIF output", Playback),
+        KIND_SPDIF_PLAYBACK => ("S/PDIF output", Playback),
         15 => ("Microphone", Monitoring),
         16 => ("Line-in", Monitoring),
         17 => ("S/PDIF", Monitoring),
@@ -125,7 +132,7 @@ fn parse_channels(index: u8, n: usize, p: &[u8]) -> Result<Vec<i16>> {
         return Err(invalid("Malformed all-channel reply"));
     }
     let mut values = vec![None; n];
-    for t in p[1..].as_chunks::<3>().0.iter() {
+    for t in p[1..].as_chunks::<3>().0 {
         let ch = t[2] as usize;
         if ch >= n || values[ch].is_some() {
             return Err(invalid("Duplicate/invalid mixer channel"));
@@ -188,9 +195,9 @@ impl<T: Read + Write> X4<T> {
             return Err(invalid("Invalid mixer range or step"));
         }
         Ok(MixerRange {
-            min_db: min_raw as f32 / 256.0,
-            max_db: max_raw as f32 / 256.0,
-            step_db: step_raw as f32 / 256.0,
+            min_db: f32::from(min_raw) / 256.0,
+            max_db: f32::from(max_raw) / 256.0,
+            step_db: f32::from(step_raw) / 256.0,
             min_raw,
             max_raw,
             step_raw,
@@ -344,21 +351,16 @@ impl<T: Read + Write> X4<T> {
             let (name, group) = identity(kind);
             let has_volume = descriptor & DESCRIPTOR_VOLUME != 0;
             let is_db = descriptor & DESCRIPTOR_DB != 0;
-            let range = if has_volume && is_db {
-                Some(self.mixer_range(index)?)
-            } else {
-                None
-            };
-            let raw_level = if has_volume {
-                Some(self.mixer_channel_level(index, 0)?)
-            } else {
-                None
-            };
-            let flag = if descriptor & DESCRIPTOR_FLAG != 0 {
-                Some(self.mixer_flag(index)?)
-            } else {
-                None
-            };
+            let range = (has_volume && is_db)
+                .then(|| self.mixer_range(index))
+                .transpose()?;
+            let raw_level = has_volume
+                .then(|| self.mixer_channel_level(index, 0))
+                .transpose()?;
+            let flag = (descriptor & DESCRIPTOR_FLAG != 0)
+                .then(|| self.mixer_flag(index))
+                .transpose()?;
+            let boost = kind == KIND_MICROPHONE_BOOST;
             controls.push(MixerControl {
                 index,
                 name,
@@ -367,17 +369,13 @@ impl<T: Read + Write> X4<T> {
                 has_volume,
                 is_db,
                 range,
-                level_db: raw_level.filter(|_| is_db).map(|r| r as f32 / 256.0),
+                level_db: raw_level
+                    .filter(|_| is_db)
+                    .map(|raw| f32::from(raw) / 256.0),
                 raw_level,
-                muted: None,
-                microphone_boost: None,
+                muted: flag.filter(|_| !boost),
+                microphone_boost: flag.filter(|_| boost).map(|raw| !raw),
             });
-            let control = controls.last_mut().expect("just pushed");
-            if control.is_microphone_boost() {
-                control.microphone_boost = flag.map(|raw| !raw);
-            } else {
-                control.muted = flag;
-            }
         }
         Ok(controls)
     }
@@ -406,7 +404,7 @@ impl<T: Read + Write> X4<T> {
     /// Index 2 writes are rejected before I/O; use the shared playback mute.
     pub fn set_mixer_mute(&mut self, index: u8, muted: bool) -> Result<()> {
         if index == 2 {
-            return Err(crate::protocol::unsupported(
+            return Err(unsupported(
                 "SPDIF playback has no independent mute; use playback index0/1",
             ));
         }
@@ -429,50 +427,7 @@ impl<T: Read + Write> X4<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::Session;
-    use std::{
-        collections::{HashMap, VecDeque},
-        io,
-        sync::{Arc, Mutex},
-    };
-    #[derive(Default)]
-    struct Fake {
-        replies: HashMap<Vec<u8>, Vec<u8>>,
-        rx: VecDeque<u8>,
-        writes: Arc<Mutex<Vec<Vec<u8>>>>,
-    }
-    impl Read for Fake {
-        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-            if self.rx.is_empty() {
-                return Err(io::ErrorKind::TimedOut.into());
-            }
-            let n = out.len().min(2).min(self.rx.len());
-            for b in &mut out[..n] {
-                *b = self.rx.pop_front().unwrap();
-            }
-            Ok(n)
-        }
-    }
-    impl Write for Fake {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.writes.lock().unwrap().push(bytes.to_vec());
-            if let Some(reply) = self.replies.get(bytes) {
-                self.rx.extend(reply);
-            }
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    fn wire(command: u8, payload: &[u8]) -> Vec<u8> {
-        let mut out = vec![0x5a, command, payload.len() as u8];
-        out.extend(payload);
-        out
-    }
-    fn ack(command: u8, status: u8) -> Vec<u8> {
-        wire(2, &[command, status, 0, 0, 0, 0, 0, 0, 0, 0])
-    }
+    use crate::testing::{Fake, ack, device, wire};
     fn fake(descriptors: &[u16]) -> Fake {
         let mut caps =
             vec![descriptors.len() as u8, descriptors.len() as u8, 0, 0];
@@ -481,7 +436,7 @@ mod tests {
         }
         caps.extend([1, 0, 0, 0]); // Unknown trailing bytes from the live capture.
         Fake {
-            replies: [(wire(0x21, &[0]), wire(0x21, &caps))].into(),
+            responses: [(wire(0x21, &[0]), wire(0x21, &caps))].into(),
             ..Default::default()
         }
     }
@@ -493,28 +448,22 @@ mod tests {
         p.extend(max.to_le_bytes());
         p.extend(min.to_le_bytes());
         p.extend(step.to_le_bytes());
-        fake.replies.insert(wire(0x22, &query), wire(0x22, &p));
-    }
-    fn device(port: Fake) -> X4<Fake> {
-        X4 {
-            session: Session::new(port),
-            firmware: "fixture".into(),
-        }
+        fake.responses.insert(wire(0x22, &query), wire(0x22, &p));
     }
     #[test]
     fn captured_mixer_values_and_boost_are_distinct() {
         let mut fake = fake(&[0x89c1, 0x00bf]);
         range_reply(&mut fake, 0, -20493, 0, 409);
-        fake.replies.insert(
+        fake.responses.insert(
             wire(0x23, &[1, 0, 0, 0, 0]),
             wire(0x23, &[0, 0x4c, 0xf8, 0]),
         );
-        fake.replies
+        fake.responses
             .insert(wire(0x24, &[1, 0]), wire(0x24, &[0, 0]));
-        fake.replies
+        fake.responses
             .insert(wire(0x24, &[1, 1]), wire(0x24, &[1, 1]));
         let controls = device(fake).mixer().unwrap();
-        assert_eq!(controls[0].level_db, Some(-7.703125));
+        assert_eq!(controls[0].level_db, Some(-7.703_125));
         assert_eq!(controls[0].range.as_ref().unwrap().min_raw, -20493);
         assert_eq!(controls[0].group, MixerGroup::Playback);
         assert_eq!(controls[1].muted, None);
@@ -548,11 +497,11 @@ mod tests {
             let mut set = vec![0, 0];
             set.extend((-1434_i16).to_le_bytes());
             set.push(0);
-            fake.replies.insert(wire(0x23, &set), ack(0x23, status));
+            fake.responses.insert(wire(0x23, &set), ack(0x23, status));
             let mut p = vec![0];
             p.extend(actual.to_le_bytes());
             p.push(0);
-            fake.replies
+            fake.responses
                 .insert(wire(0x23, &[1, 0, 0, 0, 0]), wire(0x23, &p));
             let writes = fake.writes.clone();
             let mut dev = device(fake);
@@ -577,8 +526,8 @@ mod tests {
         assert_eq!(writes.lock().unwrap().len(), 1);
         for actual in [0, 1] {
             let mut fake = self::fake(&[0x29cf]);
-            fake.replies.insert(wire(0x24, &[0, 0, 1]), ack(0x24, 0));
-            fake.replies
+            fake.responses.insert(wire(0x24, &[0, 0, 1]), ack(0x24, 0));
+            fake.responses
                 .insert(wire(0x24, &[1, 0]), wire(0x24, &[0, actual]));
             assert_eq!(
                 device(fake).set_mixer_mute(0, true).is_ok(),
@@ -594,11 +543,11 @@ mod tests {
         for enabled in [false, true] {
             for actual in [0, 1] {
                 let mut fake = fake(&descriptors);
-                fake.replies.insert(
+                fake.responses.insert(
                     wire(0x24, &[0, 10, u8::from(!enabled)]),
                     ack(0x24, 0),
                 );
-                fake.replies
+                fake.responses
                     .insert(wire(0x24, &[1, 10]), wire(0x24, &[10, actual]));
                 let mut dev = device(fake);
                 let succeeds = enabled == (actual == 0);

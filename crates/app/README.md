@@ -16,9 +16,8 @@ nix-shell --run 'cargo run --locked -- --demo'
 nix-shell --run 'ICED_BACKEND=tiny-skia cargo run --locked -- --demo'
 ```
 
-`--port`, `--status`, `--profiles` and the binary name `linuxblaster_control` are
-unchanged. Demo cannot be combined with device arguments. No new background
-service, autostart, host configuration or device reset is installed.
+Demo cannot be combined with device arguments. The app installs no background
+service or autostart entry.
 
 The sidebar switches between EQ and mixer and selects the output and onboard EQ
 profile. Output, Direct Mode, gain, SXFI and
@@ -39,11 +38,10 @@ Microphone Boost in Other controls applies immediately and displays confirmed
 device state. It uses the inverted type-63 flag (raw 0 means enabled), with API
 readback verification; it is separate from ordinary mute and level controls.
 
-Profile names and active settings come from the X4. The app has no local preset
-library, alias mapping, save/load buttons or import/export dialogs. Existing
-preset files from older versions are left untouched and ignored. EQ edits stay
-in memory until Apply EQ writes them to the selected onboard slot. Closing the
-app discards unapplied edits and leaves device settings alone.
+Profile names and active settings come from the X4; the app keeps no presets of
+its own. EQ edits stay in memory until Apply EQ writes them to the selected
+onboard slot. Closing the app discards unapplied edits and leaves device settings
+alone.
 
 Tab/Shift+Tab navigate controls; Enter/Space activate focused buttons. Numeric EQ
 fields support keyboard editing. Ctrl+R refreshes the device state. The main pane
