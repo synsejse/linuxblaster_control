@@ -51,7 +51,7 @@ ModemManager to ignore it.
 
 The repository has no submodules, so a plain `github:` input is enough. Nix
 packages that build from its `Cargo.lock` outside this flake must declare the
-`iced_t3` git dependency:
+`iced_t3` and `soundblaster-x4` Git dependencies:
 
 ```nix
 cargoLock = {
@@ -89,29 +89,32 @@ nix build                     # package
 Without Nix, you need a Rust toolchain, `pkg-config`, libudev headers and the
 usual Wayland/X11 graphics libraries.
 
-The workspace has two crates:
+The workspace contains [`crates/app`](crates/app/README.md), the Iced GUI and
+CLI. Its reusable libraries live in separate repositories:
 
-- [`crates/app`](crates/app/README.md): `linuxblaster_control`, the Iced GUI and CLI.
-- [`crates/x4`](crates/x4/README.md): `soundblaster-x4`, a standalone Rust API for
-  the X4 control protocol. Its [protocol reference](crates/x4/docs/PROTOCOL.md)
-  documents the wire format and device quirks.
+- [`soundblaster-x4`](https://github.com/synsejse/soundblaster-x4-rs): the X4
+  device API, captured-traffic tests and
+  [protocol reference](https://github.com/synsejse/soundblaster-x4-rs/blob/main/docs/PROTOCOL.md).
+- [`iced_t3`](https://github.com/synsejse/iced_t3): shared Iced design components
+  and client-side window decorations.
 
-[`iced_t3`](https://github.com/synsejse/iced_t3), a reusable library with T3
-Code's design and client-side window decorations for any Iced app, is a Cargo git
-dependency pinned to a full commit in the workspace `Cargo.toml`. Workspace commands
-do not check it, so run its own tests in its repository.
+Both are Cargo Git dependencies pinned by full commit and exact package version
+in the workspace `Cargo.toml`. Workspace commands check the app; run each
+library's tests in its own repository.
 
-To move the pin, change `rev`, run `cargo update -p iced_t3`, and set the new
-source hash in `packaging/cargo-git-hashes.nix`:
+To move a pin, change `rev`, run `cargo update -p <package>`, and set the new
+source hash in `packaging/cargo-git-hashes.nix`, for example:
 
 ```sh
+nix flake prefetch --json github:synsejse/soundblaster-x4-rs/<rev>
 nix flake prefetch --json github:synsejse/iced_t3/<rev>
 ```
 
 Also refresh `packaging/licenses/` if the bundled fonts' licenses changed.
 
-Tests never touch hardware. `crates/x4/examples/hardware_check.rs` is an opt-in
-live test that backs up the device settings and restores them afterwards.
+Tests never touch hardware. The API repository's `examples/hardware_check.rs`
+is an opt-in live test that backs up the device settings and restores them
+afterwards.
 
 ## License
 

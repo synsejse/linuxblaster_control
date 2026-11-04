@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/app", "crates/x4"]
+members = ["crates/app"]
 default-members = ["crates/app"]
 resolver = "3"
 
@@ -11,6 +11,7 @@ license = "MIT"
 repository = "https://github.com/synsejse/linuxblaster_control"
 
 [workspace.dependencies]
+soundblaster-x4 = { git = "https://github.com/synsejse/soundblaster-x4-rs", rev = "f9a61d8f55fb16398c218ded621fd0d4127759e3", version = "=0.1.0" }
 iced_t3 = { git = "https://github.com/synsejse/iced_t3", rev = "c9be75b7f1c3b1f32ee9328aa90ceb2c8dc6fee5", version = "=0.1.0" }
 serde_json = "1.0.148"
 

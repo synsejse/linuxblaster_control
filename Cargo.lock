@@ -2747,11 +2747,11 @@ dependencies = [
 [[package]]
 name = "soundblaster-x4"
 version = "0.1.0"
+source = "git+https://github.com/synsejse/soundblaster-x4-rs?rev=f9a61d8f55fb16398c218ded621fd0d4127759e3#f9a61d8f55fb16398c218ded621fd0d4127759e3"
 dependencies = [
  "aes-gcm",
  "getrandom 0.2.17",
  "serde",
- "serde_json",
  "serialport",
  "thiserror 2.0.18",
 ]

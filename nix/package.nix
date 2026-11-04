@@ -55,7 +55,7 @@ rustPlatform.buildRustPackage rec {
 
   buildInputs = runtimeLibraries;
 
-  # Captured protocol tests and headless UI checks need no device or display.
+  # Headless UI checks need no device or display; the API has its own test suite.
   doCheck = true;
   cargoTestFlags = [ "--workspace" ];
 
@@ -70,8 +70,8 @@ rustPlatform.buildRustPackage rec {
 
     # README and LICENSE
     install -Dm644 ${../README.md} $out/share/doc/${pname}/README.md
-    install -Dm644 ${../crates/x4/README.md} $out/share/doc/${pname}/api/README.md
-    install -Dm644 ${../crates/x4/docs/PROTOCOL.md} $out/share/doc/${pname}/api/PROTOCOL.md
+    install -Dm644 "$cargoDeps"/soundblaster-x4-*/README.md $out/share/doc/${pname}/api/README.md
+    install -Dm644 "$cargoDeps"/soundblaster-x4-*/docs/PROTOCOL.md $out/share/doc/${pname}/api/PROTOCOL.md
     install -Dm644 ${../LICENSE} $out/share/licenses/${pname}/LICENSE
     install -Dm644 ${../packaging/licenses/inter/LICENSE.txt} $out/share/licenses/${pname}/inter/LICENSE.txt
     install -Dm644 ${../packaging/licenses/lucide/LICENSE} $out/share/licenses/${pname}/lucide/LICENSE

@@ -10,7 +10,7 @@ repository.workspace = true
 
 [dependencies]
 iced_t3.workspace = true
-soundblaster-x4 = { path = "../x4" }
+soundblaster-x4.workspace = true
 serde_json.workspace = true
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
