@@ -28,6 +28,7 @@ pub enum SxfiMode {
     On,
     Battle,
 }
+
 impl SxfiMode {
     /// Processing token selected before enabling; `None` for `Off`.
     fn token(self) -> Option<ModeToken> {
@@ -37,11 +38,13 @@ impl SxfiMode {
             Self::Battle => Some(ModeToken::Pcg),
         }
     }
+
     /// Whether EQ slot `index` is the one this mode can use.
     pub(crate) fn uses_slot(self, index: u8) -> bool {
         (index == SXFI_SLOT) == (self != Self::Off)
     }
 }
+
 /// How long the device may take to load a slot or change processing mode.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(4);
 const LOAD_POLL: Duration = Duration::from_millis(80);
@@ -60,11 +63,7 @@ impl<T: Read + Write> X4<T> {
     /// Position of the SXFI button in `26 [05]`, i.e. its state-mask bit.
     pub(crate) fn sxfi_button_bit(&mut self) -> Result<Option<u8>> {
         let p = self.selector(0x26, &[5])?;
-        if p.len() < 4
-            || p.len() != 4 + p[2] as usize * 2
-            || p[1] != 0
-            || p[3] != 0
-        {
+        if p.len() < 4 || p.len() != 4 + p[2] as usize * 2 || p[1] != 0 || p[3] != 0 {
             return Err(invalid("Unsupported button capability layout"));
         }
         let bit = p[4..]
@@ -73,28 +72,28 @@ impl<T: Read + Write> X4<T> {
             .iter()
             .position(|v| u16::from_le_bytes(*v) == SXFI_BUTTON);
         match bit {
-            Some(bit) if bit >= 64 => {
-                Err(invalid("SXFI button index exceeds state mask"))
-            }
+            Some(bit) if bit >= 64 => Err(invalid("SXFI button index exceeds state mask")),
             bit => Ok(bit.map(|b| b as u8)),
         }
     }
+
     /// GET `26 [08 ff ff]`; reply `08 ff ff state:u64le`.
     pub(crate) fn button_enabled(&mut self, bit: u8) -> Result<bool> {
         let buttons = self.selector(0x26, &[8, 255, 255])?;
         if buttons.len() != 11 || buttons[1..3] != [255, 255] {
             return Err(invalid("Malformed button state"));
         }
-        let state =
-            u64::from(word(&buttons, 3)) | u64::from(word(&buttons, 7)) << 32;
+        let state = u64::from(word(&buttons, 3)) | u64::from(word(&buttons, 7)) << 32;
         Ok(state & (1 << bit) != 0)
     }
+
     /// SET `26 [07 1e 00 enabled 00]`; acknowledgement only.
     pub(crate) fn write_sxfi_button(&mut self, enabled: bool) -> Result<()> {
         let [low, high] = SXFI_BUTTON.to_le_bytes();
         self.session
             .set(0x26, &[7, low, high, u8::from(enabled), 0])
     }
+
     /// Check `6f [03]` advertises `token`, then SET `6f [0c token]` through
     /// its pending ACK. Does not touch the SXFI button.
     pub(crate) fn select_sxfi_token(&mut self, token: ModeToken) -> Result<()> {
@@ -106,6 +105,7 @@ impl<T: Read + Write> X4<T> {
         payload.extend(token.bytes());
         self.session.set_pending(0x6f, &payload, 0x0c)
     }
+
     /// Resolve button ID 30 in `26 [05]`, then read enable via `26 [08 ff ff]`.
     /// Enabled devices also read mode via `6f [0d]`. Return `None` when the
     /// button is not advertised; a latent `PCG ` mode alone does not mean Battle is on.
@@ -123,6 +123,7 @@ impl<T: Read + Write> X4<T> {
             _ => Err(invalid("Unknown SXFI processing mode")),
         }
     }
+
     /// GET `1a [01 02 00]`; reply `02 raw_index`. Return `raw_index & 7f`.
     /// Bit7 copies current cached record byte35 bit0; it is not EQ enable.
     pub fn active_eq_profile(&mut self) -> Result<u8> {
@@ -134,6 +135,7 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(p[1] & 0x7f)
     }
+
     /// GET `1d [01 02 flags]`: bit0 selects factory entries, bit1 the output bank.
     /// Returns the four-byte entries unchanged; these describe cached profile
     /// metadata, not whether the current mode permits selecting the slot.
@@ -155,13 +157,11 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(info[6..].as_chunks::<4>().0.to_vec())
     }
+
     /// GET inventory `1d [01 02 flags]` and names `18 [01 02 index]`.
     /// Names may span replies; the firmware zero-extends stored bytes into
     /// two-byte wire characters. Stored EQ values are read separately.
-    pub fn eq_profiles(
-        &mut self,
-        output: Output,
-    ) -> Result<Vec<EqProfileInfo>> {
+    pub fn eq_profiles(&mut self, output: Output) -> Result<Vec<EqProfileInfo>> {
         let info = self.profile_inventory(output, ProfileSource::Writable)?;
         let mut profiles = Vec::new();
         for index in 0..info.len() as u8 {
@@ -180,6 +180,7 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(profiles)
     }
+
     /// Device sends ACK before loading a profile and then emits EQ notifications.
     /// Match active and stored values so callers never receive an intermediate EQ.
     fn wait_eq_loaded(&mut self, output: Output, index: u8) -> Result<()> {
@@ -190,9 +191,7 @@ impl<T: Read + Write> X4<T> {
             "Device EQ profile did not settle; reconnect and read state",
             |x4| {
                 if x4.output()? != output {
-                    return Err(invalid(
-                        "Output changed during processing transition",
-                    ));
+                    return Err(invalid("Output changed during processing transition"));
                 }
                 if x4.active_eq_profile()? != index {
                     return Ok(false);
@@ -202,6 +201,7 @@ impl<T: Read + Write> X4<T> {
             },
         )
     }
+
     pub(crate) fn check_eq_context(
         &mut self,
         output: Output,
@@ -219,6 +219,7 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(())
     }
+
     /// SET `1a [00 02 index]`, then wait for active EQ to match the stored slot.
     /// Reject Direct Mode, unadvertised slots, slot 3 with SXFI off, and slots
     /// 0..2 with SXFI on. This does not automatically change SXFI mode.
@@ -238,6 +239,7 @@ impl<T: Read + Write> X4<T> {
         self.session.set(0x1a, &[0, 2, index])?;
         self.wait_eq_loaded(output, index)
     }
+
     /// Select `6f [0c mode[4]]` with pending-ACK handling when enabling, then
     /// SET button `26 [07 1e 00 enabled 00]` and verify mode/slot/EQ settling.
     /// Requires headphone output and Direct Mode off. Disabling only clears
@@ -248,9 +250,7 @@ impl<T: Read + Write> X4<T> {
             return Err(invalid("Super X-Fi requires headphone output"));
         }
         if self.feature(Feature::DirectMode)? {
-            return Err(invalid(
-                "Turn off Direct Mode before changing Super X-Fi",
-            ));
+            return Err(invalid("Turn off Direct Mode before changing Super X-Fi"));
         }
         if self.sxfi_button_bit()?.is_none() {
             return Err(invalid("Super X-Fi is not advertised"));

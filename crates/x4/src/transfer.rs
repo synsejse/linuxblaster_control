@@ -11,6 +11,7 @@ use std::{
     io::{Read, Write},
     time::{Duration, Instant},
 };
+
 /// Upload frames use the extended header whatever their size.
 const UPLOAD_WIDTH: FrameWidth = FrameWidth::Extended;
 /// Largest asset the host stages or downloads.
@@ -28,10 +29,10 @@ pub enum FrameWidth {
     Short,
     Extended,
 }
+
 impl FrameWidth {
     pub fn frame(self, payload: &[u8]) -> Result<Vec<u8>> {
-        if payload.len() > 4096 || (self == Self::Short && payload.len() > 255)
-        {
+        if payload.len() > 4096 || (self == Self::Short && payload.len() > 255) {
             return Err(invalid("Transfer frame bounds"));
         }
         let mut p = match self {
@@ -45,6 +46,7 @@ impl FrameWidth {
         p.extend(payload);
         Ok(p)
     }
+
     fn from_marker(marker: u8) -> Result<Self> {
         match marker {
             0x5a => Ok(Self::Short),
@@ -52,12 +54,14 @@ impl FrameWidth {
             _ => Err(invalid("Unknown data marker")),
         }
     }
+
     fn overhead(self) -> u16 {
         match self {
             Self::Short => 6,
             Self::Extended => 8,
         }
     }
+
     /// Bytes before a data slot's contents: `04 slot length`.
     fn data_header(self) -> usize {
         match self {
@@ -66,6 +70,7 @@ impl FrameWidth {
         }
     }
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartReply {
     pub offset: u32,
@@ -74,6 +79,7 @@ pub struct StartReply {
     pub resume: bool,
     pub packet_size: u16,
 }
+
 impl StartReply {
     pub fn decode(p: &[u8]) -> Result<Self> {
         if p.len() != 12 || p[0] != 2 || p[9] & 0x60 != 0 {
@@ -88,6 +94,7 @@ impl StartReply {
         })
     }
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransferInfo {
     pub total: u32,
@@ -98,6 +105,7 @@ pub struct TransferInfo {
     pub packet_size: u16,
     pub crc: Option<u32>,
 }
+
 impl TransferInfo {
     pub fn decode(p: &[u8]) -> Result<Self> {
         if p.len() < 18
@@ -118,6 +126,7 @@ impl TransferInfo {
         }
         .checked()
     }
+
     pub fn encode(self) -> Result<Vec<u8>> {
         self.checked()?;
         let mut p = vec![3];
@@ -132,6 +141,7 @@ impl TransferInfo {
         }
         Ok(p)
     }
+
     fn checked(self) -> Result<Self> {
         if self.slots == 0 || self.slots > 32 || self.offset > self.total {
             return Err(invalid("Transfer info bounds"));
@@ -139,12 +149,14 @@ impl TransferInfo {
         Ok(self)
     }
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowReply {
     pub status: u8,
     pub missing: u32,
     pub committed: u32,
 }
+
 impl WindowReply {
     pub fn decode(p: &[u8], slots: u8) -> Result<Self> {
         if p.len() != 10 || p[0] != 4 || slots == 0 || slots > 32 {
@@ -157,15 +169,18 @@ impl WindowReply {
         })
     }
 }
+
 fn slot_mask(slots: u8) -> u32 {
     u32::MAX >> (32 - slots)
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessingStatus {
     Completed,
     Processing,
     Failed(u8),
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessingResult {
     pub file_type: u8,
@@ -173,6 +188,7 @@ pub struct ProcessingResult {
     pub status: ProcessingStatus,
     pub result_byte: u8,
 }
+
 impl ProcessingResult {
     pub fn decode(p: &[u8], file_type: u8, token: u32) -> Result<Self> {
         if p.len() != 11
@@ -195,6 +211,7 @@ impl ProcessingResult {
         })
     }
 }
+
 /// Reflected IEEE CRC32; initial zero, supports incremental updates.
 pub fn crc32(previous: u32, bytes: &[u8]) -> u32 {
     let mut c = !previous;
@@ -206,11 +223,8 @@ pub fn crc32(previous: u32, bytes: &[u8]) -> u32 {
     }
     !c
 }
-pub fn data_payload(
-    width: FrameWidth,
-    sequence: u8,
-    data: &[u8],
-) -> Result<Vec<u8>> {
+
+pub fn data_payload(width: FrameWidth, sequence: u8, data: &[u8]) -> Result<Vec<u8>> {
     if sequence > 31
         || data.is_empty()
         || data.len() > u16::MAX as usize
@@ -226,6 +240,7 @@ pub fn data_payload(
     p.extend(data);
     Ok(p)
 }
+
 #[derive(Debug, Clone, Copy)]
 pub enum UploadKind {
     /// Stage bytes in /internal/upgrade/fwu.zif; does not apply firmware.
@@ -235,6 +250,7 @@ pub enum UploadKind {
     Headphone,
     Metadata,
 }
+
 impl UploadKind {
     pub fn wire(self) -> u8 {
         match self {
@@ -246,12 +262,14 @@ impl UploadKind {
         }
     }
 }
+
 /// Existing prepared vendor asset. No headmap generation or cloud credentials.
 /// Contents are deliberately excluded from Debug.
 pub struct PreparedUpload {
     kind: UploadKind,
     data: Vec<u8>,
 }
+
 impl PreparedUpload {
     pub fn new(kind: UploadKind, data: Vec<u8>) -> Result<Self> {
         if data.is_empty() || data.len() > u32::MAX as usize {
@@ -265,9 +283,7 @@ impl PreparedUpload {
             }
             UploadKind::Metadata => {
                 if data.len() > 512 {
-                    return Err(invalid(
-                        "Metadata exceeds firmware 512-byte limit",
-                    ));
+                    return Err(invalid("Metadata exceeds firmware 512-byte limit"));
                 }
             }
             UploadKind::Room11 | UploadKind::Room12 => {
@@ -293,10 +309,12 @@ impl PreparedUpload {
         }
         Ok(Self { kind, data })
     }
+
     pub fn kind(&self) -> UploadKind {
         self.kind
     }
 }
+
 /// Caller-retained identity and last confirmed committed offset for the same
 /// prepared asset. A device offer is checked again before any resumed data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,12 +324,14 @@ pub struct UploadCheckpoint {
     pub token: u32,
     pub offset: u32,
 }
+
 /// Explicit host timeouts, not firmware clock-unit conversions.
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessingPolicy {
     pub timeout: Duration,
     pub poll_interval: Duration,
 }
+
 impl Default for ProcessingPolicy {
     fn default() -> Self {
         Self {
@@ -320,6 +340,7 @@ impl Default for ProcessingPolicy {
         }
     }
 }
+
 impl ProcessingPolicy {
     fn validate(self) -> Result<()> {
         if self.timeout.is_zero()
@@ -332,6 +353,7 @@ impl ProcessingPolicy {
         Ok(())
     }
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UploadOutcome {
     AlreadyPresent,
@@ -340,6 +362,7 @@ pub enum UploadOutcome {
     Staged(ProcessingResult),
     Processed(ProcessingResult),
 }
+
 #[derive(Debug, Clone, Copy)]
 pub enum DownloadKind {
     Log,
@@ -347,6 +370,7 @@ pub enum DownloadKind {
     HeadphoneIdentifier,
     UserMetadata,
 }
+
 impl DownloadKind {
     fn wire(self) -> u8 {
         match self {
@@ -357,12 +381,10 @@ impl DownloadKind {
         }
     }
 }
+
 /// Sanitizes all sixteen uninitialized stack bytes before returning data.
 /// No raw room-descriptor persistence or Debug output is provided.
-pub fn sanitize_download(
-    kind: DownloadKind,
-    mut bytes: Vec<u8>,
-) -> Result<Information> {
+pub fn sanitize_download(kind: DownloadKind, mut bytes: Vec<u8>) -> Result<Information> {
     match kind {
         DownloadKind::RoomDescriptor if bytes.len() == 154 => {
             bytes[..8].fill(0);
@@ -377,12 +399,14 @@ pub fn sanitize_download(
     }
     Ok(Information(bytes))
 }
+
 /// The `09 type token` query for a processing result.
 fn processing_query(file_type: u8, token: u32) -> Vec<u8> {
     let mut p = vec![9, file_type];
     p.extend(token.to_le_bytes());
     p
 }
+
 /// Where an upload starts: zero, or a checkpoint that matches the device's offer.
 fn resume_offset(
     start: StartReply,
@@ -401,9 +425,7 @@ fn resume_offset(
                 || start.offset > total
                 || (file_type == 1 && saved.offset != start.offset)
             {
-                return Err(invalid(
-                    "Resume identity/committed limit mismatch",
-                ));
+                return Err(invalid("Resume identity/committed limit mismatch"));
             }
             Ok(saved.offset)
         }
@@ -413,6 +435,7 @@ fn resume_offset(
         None => Ok(0),
     }
 }
+
 /// Data bytes per upload slot at the negotiated packet size.
 fn upload_stride(packet_size: u16) -> Result<usize> {
     let stride = packet_size
@@ -424,6 +447,7 @@ fn upload_stride(packet_size: u16) -> Result<usize> {
     }
     Ok(stride as usize)
 }
+
 /// The slots of one upload window and the range of the asset they cover.
 struct UploadWindow<'a> {
     chunks: Vec<&'a [u8]>,
@@ -431,15 +455,18 @@ struct UploadWindow<'a> {
     end: u32,
     last: bool,
 }
+
 impl UploadWindow<'_> {
     fn mask(&self) -> u32 {
         slot_mask(self.chunks.len() as u8)
     }
 }
+
 /// A host ACK for a download step, in the extended frame the device expects.
 fn download_ack(selector: u8, flags: u8) -> [u8; 14] {
     [0x5b, 2, 10, 0, 0x98, 0, selector, flags, 0, 0, 0, 0, 0, 0]
 }
+
 /// The slots of one download window, which can arrive in any order.
 struct DownloadWindow {
     slots: Vec<Option<Vec<u8>>>,
@@ -451,6 +478,7 @@ struct DownloadWindow {
     /// Bytes of the asset still to come, this window included.
     remaining: usize,
 }
+
 impl DownloadWindow {
     fn new(info: &TransferInfo, received: usize) -> Self {
         Self {
@@ -461,9 +489,11 @@ impl DownloadWindow {
             remaining: info.total as usize - received,
         }
     }
+
     fn stride(&self, width: FrameWidth) -> usize {
         self.packet_size - width.overhead() as usize
     }
+
     fn accept(&mut self, frame: &Frame) -> Result<()> {
         if frame.payload[0] == 4 {
             self.accept_data(frame)
@@ -471,6 +501,7 @@ impl DownloadWindow {
             self.accept_end(&frame.payload)
         }
     }
+
     fn accept_data(&mut self, frame: &Frame) -> Result<()> {
         let width = FrameWidth::from_marker(frame.marker)?;
         if self.width.is_some_and(|old| old != width) {
@@ -489,17 +520,12 @@ impl DownloadWindow {
         };
         let stride = self.stride(width);
         let expected = self.remaining.saturating_sub(slot * stride).min(stride);
-        if slot >= self.slots.len()
-            || count == 0
-            || count != expected
-            || p.len() != header + count
+        if slot >= self.slots.len() || count == 0 || count != expected || p.len() != header + count
         {
             return Err(invalid("Download slot length/total bounds"));
         }
         match &self.slots[slot] {
-            Some(old) if old != &p[header..] => {
-                Err(invalid("Conflicting duplicate download slot"))
-            }
+            Some(old) if old != &p[header..] => Err(invalid("Conflicting duplicate download slot")),
             Some(_) => Ok(()),
             None => {
                 self.slots[slot] = Some(p[header..].to_vec());
@@ -507,6 +533,7 @@ impl DownloadWindow {
             }
         }
     }
+
     fn accept_end(&mut self, p: &[u8]) -> Result<()> {
         if p.len() != 3 || p[1] != 128 || p[2] as usize >= self.slots.len() {
             return Err(invalid("Download end marker"));
@@ -518,6 +545,7 @@ impl DownloadWindow {
         self.last = Some(slot);
         Ok(())
     }
+
     /// How many slots this window needs, and whether it is the asset's last.
     fn extent(&self) -> (usize, bool) {
         let stride = self.stride(self.width.unwrap_or(FrameWidth::Extended));
@@ -526,6 +554,7 @@ impl DownloadWindow {
             self.remaining <= stride * self.slots.len(),
         )
     }
+
     /// Bitmap of the first `needed` slots that have not arrived.
     fn missing(&self, needed: usize) -> u32 {
         self.slots[..needed]
@@ -535,27 +564,23 @@ impl DownloadWindow {
             .fold(0, |mask, (i, _)| mask | 1 << i)
     }
 }
+
 impl<T: Read + Write> X4<T> {
     pub fn transfer_types(&mut self) -> Result<Vec<u8>> {
         self.selector(0x98, &[8])
     }
+
     /// Firmware holds a single last-result cache, not a token-indexed history.
-    pub fn transfer_processing(
-        &mut self,
-        file_type: u8,
-        token: u32,
-    ) -> Result<ProcessingResult> {
+    pub fn transfer_processing(&mut self, file_type: u8, token: u32) -> Result<ProcessingResult> {
         let r = self.selector(0x98, &processing_query(file_type, token))?;
         ProcessingResult::decode(&r, file_type, token)
     }
+
     fn send_transfer(&mut self, width: FrameWidth, p: &[u8]) -> Result<()> {
         self.session.transfer_send(&width.frame(p)?)
     }
-    fn transfer_ack(
-        &mut self,
-        selector: u8,
-        offset: Option<u32>,
-    ) -> Result<()> {
+
+    fn transfer_ack(&mut self, selector: u8, offset: Option<u32>) -> Result<()> {
         let p = self
             .session
             .continuation(2, |f| f.payload.first() == Some(&0x98))?;
@@ -567,11 +592,9 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(())
     }
+
     /// Run one transfer exchange; a failure invalidates the session.
-    fn transfer<R>(
-        &mut self,
-        exchange: impl FnOnce(&mut Self) -> Result<R>,
-    ) -> Result<R> {
+    fn transfer<R>(&mut self, exchange: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
         self.session.begin_transfer()?;
         let result = exchange(self);
         self.session.end_transfer();
@@ -580,14 +603,13 @@ impl<T: Read + Write> X4<T> {
         }
         result
     }
+
     /// Fresh prepared upload, bounded retries of explicitly missing slots only.
     /// Returns processing completion, never a claim that new acoustic filters activated.
-    pub fn upload_prepared(
-        &mut self,
-        asset: &PreparedUpload,
-    ) -> Result<UploadOutcome> {
+    pub fn upload_prepared(&mut self, asset: &PreparedUpload) -> Result<UploadOutcome> {
         self.upload_prepared_with_policy(asset, ProcessingPolicy::default())
     }
+
     /// Host timing policy, independent of firmware's nominal one-second callbacks
     /// and 12/30-callback thresholds, which are subject to scheduling delay.
     pub fn upload_prepared_with_policy(
@@ -597,6 +619,7 @@ impl<T: Read + Write> X4<T> {
     ) -> Result<UploadOutcome> {
         self.upload(asset, policy, None, |_| true)
     }
+
     /// Resume the same prepared bytes from a previously confirmed committed
     /// offset. The device must offer the same token and at least that offset.
     /// Callers must preserve the original asset; this API cannot infer its identity
@@ -609,6 +632,7 @@ impl<T: Read + Write> X4<T> {
     ) -> Result<UploadOutcome> {
         self.upload(asset, policy, Some(checkpoint), |_| true)
     }
+
     /// Receive resumable checkpoints after setup and each acknowledged shift.
     /// Return false to cancel locally and invalidate the session. No wire cancel
     /// is sent, and firmware retention is not guaranteed.
@@ -620,6 +644,7 @@ impl<T: Read + Write> X4<T> {
     ) -> Result<UploadOutcome> {
         self.upload(asset, policy, None, progress)
     }
+
     fn upload(
         &mut self,
         asset: &PreparedUpload,
@@ -628,10 +653,9 @@ impl<T: Read + Write> X4<T> {
         mut progress: impl FnMut(UploadCheckpoint) -> bool,
     ) -> Result<UploadOutcome> {
         policy.validate()?;
-        self.transfer(|x4| {
-            x4.upload_asset(asset, policy, resume, &mut progress)
-        })
+        self.transfer(|x4| x4.upload_asset(asset, policy, resume, &mut progress))
     }
+
     fn upload_asset(
         &mut self,
         asset: &PreparedUpload,
@@ -678,8 +702,7 @@ impl<T: Read + Write> X4<T> {
         report(offset)?;
         let mut committed = offset as usize;
         while committed < asset.data.len() {
-            let end = (committed + stride * start.slots as usize)
-                .min(asset.data.len());
+            let end = (committed + stride * start.slots as usize).min(asset.data.len());
             let window = UploadWindow {
                 chunks: asset.data[committed..end].chunks(stride).collect(),
                 committed: committed as u32,
@@ -704,12 +727,9 @@ impl<T: Read + Write> X4<T> {
             UploadOutcome::Processed(result)
         })
     }
+
     /// Send the slots set in `slots`, then the last window's end marker.
-    fn send_slots(
-        &mut self,
-        window: &UploadWindow<'_>,
-        slots: u32,
-    ) -> Result<()> {
+    fn send_slots(&mut self, window: &UploadWindow<'_>, slots: u32) -> Result<()> {
         for (i, chunk) in window.chunks.iter().enumerate() {
             if slots & (1 << i) != 0 {
                 let payload = data_payload(UPLOAD_WIDTH, i as u8, chunk)?;
@@ -722,13 +742,10 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(())
     }
+
     /// Wait for the device to take `window`, resending the slots it reports
     /// missing. Returns false when the device already holds the asset.
-    fn confirm_window(
-        &mut self,
-        window: &UploadWindow<'_>,
-        slots: u8,
-    ) -> Result<bool> {
+    fn confirm_window(&mut self, window: &UploadWindow<'_>, slots: u8) -> Result<bool> {
         let mut retries = 0;
         loop {
             let p = self
@@ -737,9 +754,7 @@ impl<T: Read + Write> X4<T> {
             let reply = WindowReply::decode(&p, slots)?;
             match reply.status {
                 0x81 => {
-                    if reply.committed != window.committed
-                        || reply.missing & window.mask() == 0
-                    {
+                    if reply.committed != window.committed || reply.missing & window.mask() == 0 {
                         return Err(invalid("Recovery offset/bitmap mismatch"));
                     }
                     if retries == UPLOAD_RETRIES {
@@ -752,12 +767,8 @@ impl<T: Read + Write> X4<T> {
                 }
                 0x10 => return Ok(false),
                 0 => {
-                    if reply.committed != window.end
-                        || reply.missing & window.mask() != 0
-                    {
-                        return Err(invalid(
-                            "Window completion offset/bitmap mismatch",
-                        ));
+                    if reply.committed != window.end || reply.missing & window.mask() != 0 {
+                        return Err(invalid("Window completion offset/bitmap mismatch"));
                     }
                     return Ok(true);
                 }
@@ -769,6 +780,7 @@ impl<T: Read + Write> X4<T> {
             }
         }
     }
+
     fn wait_processing(
         &mut self,
         file_type: u8,
@@ -778,27 +790,17 @@ impl<T: Read + Write> X4<T> {
         let deadline = Instant::now() + policy.timeout;
         loop {
             let until = deadline.min(Instant::now() + policy.poll_interval);
-            let reply =
-                self.session.continuation_frame_until(0x98, until, |f| {
-                    let p = &f.payload;
-                    p.len() >= 7
-                        && p[0] == 9
-                        && p[1] == file_type
-                        && word(p, 3) == token
-                });
+            let reply = self.session.continuation_frame_until(0x98, until, |f| {
+                let p = &f.payload;
+                p.len() >= 7 && p[0] == 9 && p[1] == file_type && word(p, 3) == token
+            });
             match reply {
                 Ok(frame) => {
-                    let result = ProcessingResult::decode(
-                        &frame.payload,
-                        file_type,
-                        token,
-                    )?;
+                    let result = ProcessingResult::decode(&frame.payload, file_type, token)?;
                     match result.status {
                         ProcessingStatus::Completed => return Ok(result),
                         ProcessingStatus::Failed(s) => {
-                            return Err(invalid(format!(
-                                "Processing failed: {s:02x}"
-                            )));
+                            return Err(invalid(format!("Processing failed: {s:02x}")));
                         }
                         ProcessingStatus::Processing => {}
                     }
@@ -810,10 +812,7 @@ impl<T: Read + Write> X4<T> {
                     // Type01 staging sends an asynchronous success but does not
                     // populate the firmware's query cache on this path.
                     if file_type != 1 {
-                        self.send_transfer(
-                            FrameWidth::Short,
-                            &processing_query(file_type, token),
-                        )?;
+                        self.send_transfer(FrameWidth::Short, &processing_query(file_type, token))?;
                     }
                 }
                 Err(e) => return Err(e),
@@ -823,14 +822,12 @@ impl<T: Read + Write> X4<T> {
             }
         }
     }
+
     /// Fresh multiwindow download with missing-slot recovery, at most 16 MiB.
     /// Host policy: 60 seconds overall, one second per recovery interval, ten retries.
     /// No partial data escapes. Both data frame markers are decoded.
     /// Room descriptor stale-stack regions are sanitized after CRC verification.
-    pub fn download_asset(
-        &mut self,
-        kind: DownloadKind,
-    ) -> Result<Information> {
+    pub fn download_asset(&mut self, kind: DownloadKind) -> Result<Information> {
         self.transfer(|x4| {
             let info = x4.start_download(kind)?;
             let mut data = Vec::with_capacity(info.total as usize);
@@ -844,6 +841,7 @@ impl<T: Read + Write> X4<T> {
             sanitize_download(kind, data)
         })
     }
+
     /// Negotiate a download and acknowledge its parameters.
     fn start_download(&mut self, kind: DownloadKind) -> Result<TransferInfo> {
         let file_type = kind.wire();
@@ -852,10 +850,7 @@ impl<T: Read + Write> X4<T> {
         let ack = self
             .session
             .continuation(2, |f| f.payload.first() == Some(&0x98))?;
-        if ack.len() != 10
-            || ack[..3] != [0x98, 0, 2]
-            || ack[7] != (file_type & 127)
-        {
+        if ack.len() != 10 || ack[..3] != [0x98, 0, 2] || ack[7] != (file_type & 127) {
             return Err(invalid("Download start rejected/identity mismatch"));
         }
         let packet = self.session.max_payload.min(4096) as u16;
@@ -885,6 +880,7 @@ impl<T: Read + Write> X4<T> {
         self.session.transfer_send(&download_ack(3, 1))?;
         Ok(info)
     }
+
     /// Collect one window into `data`, asking for whatever does not arrive.
     fn download_window(
         &mut self,
@@ -896,10 +892,9 @@ impl<T: Read + Write> X4<T> {
         let mut retries = 0;
         loop {
             let until = deadline.min(Instant::now() + DOWNLOAD_POLL);
-            let received =
-                self.session.continuation_frame_until(0x98, until, |f| {
-                    matches!(f.payload.first(), Some(4 | 6))
-                });
+            let received = self.session.continuation_frame_until(0x98, until, |f| {
+                matches!(f.payload.first(), Some(4 | 6))
+            });
             let timed_out = match received {
                 Ok(frame) => {
                     window.accept(&frame)?;
@@ -919,8 +914,7 @@ impl<T: Read + Write> X4<T> {
                 return Err(invalid("End marker disagrees with total"));
             }
             let missing = window.missing(needed);
-            let complete =
-                missing == 0 && (!final_window || window.last.is_some());
+            let complete = missing == 0 && (!final_window || window.last.is_some());
             if !complete && !timed_out && window.last.is_none() {
                 continue;
             }
@@ -931,8 +925,7 @@ impl<T: Read + Write> X4<T> {
                 retries += 1;
             }
             let held = window.slots[..needed].iter().flatten().map(Vec::len);
-            let committed =
-                data.len() + if complete { held.sum::<usize>() } else { 0 };
+            let committed = data.len() + if complete { held.sum::<usize>() } else { 0 };
             let mut reply = vec![4, if complete { 0 } else { 0x81 }];
             reply.extend((missing | !slot_mask(needed as u8)).to_le_bytes());
             reply.extend((committed as u32).to_le_bytes());
@@ -950,13 +943,12 @@ impl<T: Read + Write> X4<T> {
                 return Err(invalid("Download committed offset"));
             }
             self.session.transfer_send(&download_ack(5, 0))?;
-            data.extend(
-                window.slots.into_iter().take(needed).flatten().flatten(),
-            );
+            data.extend(window.slots.into_iter().take(needed).flatten().flatten());
             return Ok(());
         }
     }
 }
+
 fn push_string(p: &mut Vec<u8>, s: &[u8]) -> Result<()> {
     if s.contains(&0) {
         return Err(invalid("Metadata string contains NUL"));
@@ -965,6 +957,7 @@ fn push_string(p: &mut Vec<u8>, s: &[u8]) -> Result<()> {
     p.push(0);
     Ok(())
 }
+
 fn read_string(p: &[u8], pos: &mut usize) -> Result<Vec<u8>> {
     let n = p[*pos..]
         .iter()
@@ -974,6 +967,7 @@ fn read_string(p: &[u8], pos: &mut usize) -> Result<Vec<u8>> {
     *pos += n + 1;
     Ok(s)
 }
+
 /// User-profile metadata, not acoustic coefficients. Private fields are never Debug logged.
 pub struct UserMetadata {
     pub user_id: Vec<u8>,
@@ -982,6 +976,7 @@ pub struct UserMetadata {
     pub parent_profile_id: Vec<u8>,
     pub generation: Vec<u8>,
 }
+
 impl UserMetadata {
     pub fn encode(&self) -> Result<Vec<u8>> {
         let mut p = vec![0; 4];
@@ -997,6 +992,7 @@ impl UserMetadata {
         p[..4].copy_from_slice(&size.to_le_bytes());
         Ok(p)
     }
+
     pub fn decode(p: &[u8]) -> Result<Self> {
         if p.len() < 16 || p.len() > 512 || word(p, 0) as usize != p.len() {
             return Err(invalid("Metadata total length"));
@@ -1024,16 +1020,19 @@ impl UserMetadata {
         })
     }
 }
+
 impl std::fmt::Debug for UserMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("UserMetadata([redacted])")
     }
 }
+
 impl PreparedUpload {
     pub fn metadata(value: &UserMetadata) -> Result<Self> {
         Self::new(UploadKind::Metadata, value.encode()?)
     }
 }
+
 /// Parsed room export contains only initialized fields. Numeric mode bytes have no inferred acoustic label.
 #[derive(Debug)]
 pub struct RoomDescriptor {
@@ -1042,6 +1041,7 @@ pub struct RoomDescriptor {
     pub field_32: Information,
     pub field_72: Information,
 }
+
 impl RoomDescriptor {
     pub fn decode(p: &[u8]) -> Result<Self> {
         if p.len() != 154 {
@@ -1055,6 +1055,7 @@ impl RoomDescriptor {
         })
     }
 }
+
 /// Known start codec, including explicitly experimental file-backed upload types.
 #[derive(Debug, Clone, Copy)]
 pub enum TransferStart {
@@ -1062,6 +1063,7 @@ pub enum TransferStart {
     Download(DownloadKind),
     ExperimentalFileUpload { file_type: u8, total: u32 },
 }
+
 impl TransferStart {
     pub fn encode(self) -> Result<[u8; 6]> {
         let (total, kind) = match self {

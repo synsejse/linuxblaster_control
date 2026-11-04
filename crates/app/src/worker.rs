@@ -1,7 +1,5 @@
 //! The thread that owns the X4 and runs every read and write.
-use soundblaster_x4::{
-    Equalizer, Error, Feature, Output, Port, Result, State, SxfiMode, X4, open,
-};
+use soundblaster_x4::{Equalizer, Error, Feature, Output, Port, Result, State, SxfiMode, X4, open};
 use std::{
     sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
     thread,
@@ -26,6 +24,7 @@ pub struct EqContext {
     profile: Option<u8>,
     pub direct: bool,
 }
+
 impl EqContext {
     pub fn from_state(state: &State) -> Self {
         Self {
@@ -35,6 +34,7 @@ impl EqContext {
             direct: state.feature(Feature::DirectMode),
         }
     }
+
     pub fn check(self, state: &State) -> Result<()> {
         if self != Self::from_state(state) {
             return Err(rejected(
@@ -58,6 +58,7 @@ pub enum Command {
     MixerMute(u8, bool),
     MicrophoneBoost(bool),
 }
+
 impl Command {
     fn writes(&self) -> bool {
         !matches!(self, Self::Refresh)
@@ -73,6 +74,7 @@ pub enum Completion {
     EqApplied,
     Applied,
 }
+
 impl Completion {
     fn of(command: Option<&Command>) -> Self {
         match command {
@@ -98,11 +100,7 @@ pub fn spawn(port: Option<String>) -> (Sender<Command>, Receiver<Event>) {
     (tx, rx)
 }
 
-fn run(
-    port: Option<&str>,
-    commands: &Receiver<Command>,
-    events: &Sender<Event>,
-) {
+fn run(port: Option<&str>, commands: &Receiver<Command>, events: &Sender<Event>) {
     let mut device = None;
     loop {
         let poll = if device.is_some() {
@@ -153,8 +151,7 @@ fn serve(
     if let Some(Command::Apply(context, changes)) = command {
         let mut current = device.state()?;
         context.check(&current)?;
-        super::draft::validate_changes(&current, changes)
-            .map_err(Error::Invalid)?;
+        crate::edit::validate_changes(&current, changes).map_err(Error::Invalid)?;
         for change in changes {
             EqContext::from_state(&current).check(&device.state()?)?;
             apply_one(device, Some(&change.rebased(&current)))?;

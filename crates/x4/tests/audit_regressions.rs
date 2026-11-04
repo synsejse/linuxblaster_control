@@ -6,19 +6,20 @@
 )]
 
 use soundblaster_x4::{
-    Error, X4, dsp::*, protocol::Session, software::*, sxfi::ModeToken,
-    transfer::*,
+    Error, X4, dsp::*, protocol::Session, software::*, sxfi::ModeToken, transfer::*,
 };
 use std::{
     collections::VecDeque,
     io::{self, Read, Write},
 };
+
 #[derive(Default)]
 struct Script {
     steps: VecDeque<(Vec<u8>, Vec<u8>)>,
     rx: VecDeque<u8>,
     max_read: usize,
 }
+
 impl Read for Script {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         if self.rx.is_empty() {
@@ -35,6 +36,7 @@ impl Read for Script {
         Ok(n)
     }
 }
+
 impl Write for Script {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         let (want, reply) = self.steps.pop_front().expect("unexpected write");
@@ -42,15 +44,18 @@ impl Write for Script {
         self.rx.extend(reply);
         Ok(data.len())
     }
+
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
+
 fn frame(c: u8, p: &[u8]) -> Vec<u8> {
     let mut v = vec![0x5a, c, p.len() as u8];
     v.extend(p);
     v
 }
+
 fn dev(steps: Vec<(Vec<u8>, Vec<u8>)>) -> X4<Script> {
     X4 {
         session: Session::new(Script {
@@ -60,6 +65,7 @@ fn dev(steps: Vec<(Vec<u8>, Vec<u8>)>) -> X4<Script> {
         firmware: "static fixture".into(),
     }
 }
+
 #[test]
 fn factory_and_current_bank_profiles_preserve_request_identity() {
     let mut data = 12u32.to_le_bytes().to_vec();
@@ -91,10 +97,7 @@ fn factory_and_current_bank_profiles_preserve_request_identity() {
     )]);
     assert_eq!(
         device
-            .profile_inventory(
-                soundblaster_x4::Output::Headphone,
-                ProfileSource::Factory
-            )
+            .profile_inventory(soundblaster_x4::Output::Headphone, ProfileSource::Factory)
             .unwrap(),
         vec![[0x8e, 0x40, 0x8c, 0]],
     );
@@ -122,6 +125,7 @@ fn profile_listing_accepts_fragmented_32_character_names() {
     assert_eq!(profiles.len(), 1);
     assert_eq!(profiles[0].name.as_bytes(), name);
 }
+
 #[test]
 fn mixer_explicit_channel_and_wrong_echo() {
     for ch in [0, 1] {
@@ -132,6 +136,7 @@ fn mixer_explicit_channel_and_wrong_echo() {
         assert_eq!(d.mixer_channel_level(0, 0).is_ok(), ch == 0);
     }
 }
+
 #[test]
 fn all_channel_shape_duplicate_and_missing() {
     for bad in 0..3 {
@@ -142,11 +147,11 @@ fn all_channel_shape_duplicate_and_missing() {
         if bad == 2 {
             p.pop();
         }
-        let mut d =
-            dev(vec![(frame(0x23, &[1, 2, 0, 0, 255]), frame(0x23, &p))]);
+        let mut d = dev(vec![(frame(0x23, &[1, 2, 0, 0, 255]), frame(0x23, &p))]);
         assert_eq!(d.mixer_channels(2).is_ok(), bad == 0);
     }
 }
+
 #[test]
 fn dsp_fragment_boundaries_bits_and_unrelated_frames() {
     let params: Vec<_> = (9..21)
@@ -175,6 +180,7 @@ fn dsp_fragment_boundaries_bits_and_unrelated_frames() {
     assert_eq!(d.session.notifications.front().unwrap().command, 0x70);
     assert!(decode_fragment(&[10, 0]).is_err());
 }
+
 #[test]
 fn codecs_crc_resume_bitmap_and_processing() {
     assert_eq!(crc32(0, b"123456789"), 0xcbf4_3926);
@@ -192,8 +198,7 @@ fn codecs_crc_resume_bitmap_and_processing() {
     let mut p = info.encode().unwrap();
     p[14] = 1;
     assert!(TransferInfo::decode(&p).is_err());
-    let r = WindowReply::decode(&[4, 129, 242, 255, 255, 255, 0, 0, 0, 0], 4)
-        .unwrap();
+    let r = WindowReply::decode(&[4, 129, 242, 255, 255, 255, 0, 0, 0, 0], 4).unwrap();
     assert_eq!(r.missing, 2);
     let p = [9, 20, 129, 7, 0, 0, 0, 0, 0, 0, 0];
     assert_eq!(
@@ -204,15 +209,16 @@ fn codecs_crc_resume_bitmap_and_processing() {
     assert!(data_payload(FrameWidth::Short, 32, &[1]).is_err());
     assert!(data_payload(FrameWidth::Short, 0, &[1; 253]).is_err());
 }
+
 #[test]
 fn room_stale_stack_sanitized_and_private_debug() {
-    let info = sanitize_download(DownloadKind::RoomDescriptor, vec![0xaa; 154])
-        .unwrap();
+    let info = sanitize_download(DownloadKind::RoomDescriptor, vec![0xaa; 154]).unwrap();
     assert_eq!(&info.0[..8], &[0; 8]);
     assert_eq!(&info.0[146..], &[0; 8]);
     assert_eq!(&info.0[8..146], &[0xaa; 138]);
     assert_eq!(format!("{info:?}"), "Information([redacted])");
 }
+
 #[test]
 fn software_semantics() {
     assert_eq!(ModeToken::Movie.bytes(), *b"MV  ");
@@ -226,6 +232,7 @@ fn software_semantics() {
         [1.; 10]
     );
 }
+
 fn upload_script(status: u8, ack_offset: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
     let w = FrameWidth::Extended;
     let data = [1, 2, 3];
@@ -262,16 +269,17 @@ fn upload_script(status: u8, ack_offset: u32) -> Vec<(Vec<u8>, Vec<u8>)> {
         (w.frame(&[5, 3, 0, 0, 0]).unwrap(), final_reply),
     ]
 }
+
 #[test]
 fn upload_waits_processing_and_rejects_crc_failure_or_wrong_shift_ack() {
     for (status, offset, ok) in [(0, 3, true), (129, 3, false), (0, 2, false)] {
         let mut d = dev(upload_script(status, offset));
-        let asset =
-            PreparedUpload::new(UploadKind::Metadata, vec![1, 2, 3]).unwrap();
+        let asset = PreparedUpload::new(UploadKind::Metadata, vec![1, 2, 3]).unwrap();
         assert_eq!(d.upload_prepared(&asset).is_ok(), ok);
         assert_eq!(d.session.usable, ok);
     }
 }
+
 #[test]
 fn upload_resume_is_explicit_error() {
     let mut d = dev(vec![(
@@ -282,6 +290,7 @@ fn upload_resume_is_explicit_error() {
     let e = d.upload_prepared(&a).unwrap_err();
     assert!(matches!(e, Error::Unsupported(_)));
 }
+
 #[test]
 fn upload_missing_mask_resends_only_requested_slot_and_checks_offset() {
     for offset in [0u32, 1] {
@@ -294,8 +303,7 @@ fn upload_missing_mask_resends_only_requested_slot_and_checks_offset() {
         steps.insert(4, steps[2].clone());
         steps.insert(5, marker);
         let mut d = dev(steps);
-        let a =
-            PreparedUpload::new(UploadKind::Metadata, vec![1, 2, 3]).unwrap();
+        let a = PreparedUpload::new(UploadKind::Metadata, vec![1, 2, 3]).unwrap();
         assert_eq!(d.upload_prepared(&a).is_ok(), offset == 0);
     }
     let mut steps = upload_script(0, 3);
@@ -310,6 +318,7 @@ fn upload_missing_mask_resends_only_requested_slot_and_checks_offset() {
     let a = PreparedUpload::new(UploadKind::Metadata, vec![1, 2, 3]).unwrap();
     assert!(d.upload_prepared(&a).is_ok());
 }
+
 #[test]
 fn download_checks_complete_window_and_crc_before_sanitizing() {
     for missing in [false, true] {
@@ -329,9 +338,7 @@ fn download_checks_complete_window_and_crc_before_sanitizing() {
             if missing && i == 1 {
                 continue;
             }
-            frames.extend(
-                w.frame(&data_payload(w, i as u8, c).unwrap()).unwrap(),
-            );
+            frames.extend(w.frame(&data_payload(w, i as u8, c).unwrap()).unwrap());
         }
         frames.extend(w.frame(&[6, 128, 3]).unwrap());
         let mut start = vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 31];
@@ -380,6 +387,7 @@ fn download_checks_complete_window_and_crc_before_sanitizing() {
         }
     }
 }
+
 #[test]
 fn metadata_roundtrip_and_truncated_or_private_fields() {
     let m = UserMetadata {
@@ -428,8 +436,7 @@ fn early_processing_is_retained_only_for_current_transfer() {
             response.extend(&steps[before].1);
             steps[before].1 = response;
             let mut d = dev(steps);
-            let a = PreparedUpload::new(UploadKind::Metadata, vec![1, 2, 3])
-                .unwrap();
+            let a = PreparedUpload::new(UploadKind::Metadata, vec![1, 2, 3]).unwrap();
             assert_eq!(d.upload_prepared(&a).is_ok(), status == 0);
             assert_eq!(d.session.notifications.front().unwrap().command, 0x70);
         }
@@ -490,17 +497,9 @@ fn metadata_download_variable_lengths_and_invalid_strings() {
             generation: vec![],
         };
         let p = m.encode().unwrap();
-        assert!(
-            sanitize_download(DownloadKind::UserMetadata, p.clone()).is_ok()
-        );
+        assert!(sanitize_download(DownloadKind::UserMetadata, p.clone()).is_ok());
         for end in 0..p.len() {
-            assert!(
-                sanitize_download(
-                    DownloadKind::UserMetadata,
-                    p[..end].to_vec()
-                )
-                .is_err()
-            );
+            assert!(sanitize_download(DownloadKind::UserMetadata, p[..end].to_vec()).is_err());
         }
         let mut bad = p;
         bad[4..].fill(1);
@@ -541,9 +540,7 @@ fn download_log_script(width: FrameWidth, bad: u8) -> Vec<(Vec<u8>, Vec<u8>)> {
         .unwrap();
     second.extend(
         width
-            .frame(
-                &data_payload(width, 0, &data[2 * stride..3 * stride]).unwrap(),
-            )
+            .frame(&data_payload(width, 0, &data[2 * stride..3 * stride]).unwrap())
             .unwrap(),
     );
     if bad == 2 {
@@ -583,6 +580,7 @@ fn download_log_script(width: FrameWidth, bad: u8) -> Vec<(Vec<u8>, Vec<u8>)> {
         (ack(5), vec![]),
     ]
 }
+
 #[test]
 fn multiwindow_download_both_markers_reordered_and_crc_or_duplicate_errors() {
     for width in [FrameWidth::Short, FrameWidth::Extended] {
@@ -603,8 +601,7 @@ fn upload_already_present_and_partial_validator_failures() {
         let mut steps = upload_script(0, 3);
         steps[3].1 = frame(0x98, &[4, status, 255, 255, 255, 255, 0, 0, 0, 0]);
         steps.truncate(4);
-        let a =
-            PreparedUpload::new(UploadKind::Metadata, vec![1, 2, 3]).unwrap();
+        let a = PreparedUpload::new(UploadKind::Metadata, vec![1, 2, 3]).unwrap();
         let result = dev(steps).upload_prepared(&a);
         if status == 0x10 {
             assert_eq!(result.unwrap(), UploadOutcome::AlreadyPresent);
@@ -685,6 +682,7 @@ fn split_reads_and_resume_checkpoint_validation() {
         );
     }
 }
+
 #[test]
 fn local_cancel_returns_checkpoint_and_staging_is_distinct() {
     let a = PreparedUpload::new(UploadKind::Metadata, vec![1, 2, 3]).unwrap();
@@ -706,8 +704,7 @@ fn local_cancel_returns_checkpoint_and_staging_is_distinct() {
     steps[4]
         .1
         .extend(frame(0x98, &[9, 1, 0, 7, 0, 0, 0, 0, 0, 0, 0]));
-    let a =
-        PreparedUpload::new(UploadKind::FirmwareStage, vec![1, 2, 3]).unwrap();
+    let a = PreparedUpload::new(UploadKind::FirmwareStage, vec![1, 2, 3]).unwrap();
     assert!(matches!(
         dev(steps).upload_prepared(&a).unwrap(),
         UploadOutcome::Staged(_)
@@ -731,8 +728,7 @@ fn full_upload_window_requires_all_bits_clear_and_repeats_final_marker() {
             crc: Some(crc32(0, &data)),
         };
         steps[1].0 = w.frame(&info.encode().unwrap()).unwrap();
-        steps[2].0 =
-            w.frame(&data_payload(w, 0, &data[..24]).unwrap()).unwrap();
+        steps[2].0 = w.frame(&data_payload(w, 0, &data[..24]).unwrap()).unwrap();
         steps[3].0 = w.frame(&[6, 128, 1]).unwrap();
         let mut reply = vec![4, 0];
         reply.extend((0xffff_fffc_u32 | missing).to_le_bytes());
@@ -746,11 +742,11 @@ fn full_upload_window_requires_all_bits_clear_and_repeats_final_marker() {
                 vec![],
             ),
         );
-        let asset =
-            PreparedUpload::new(UploadKind::Metadata, data.clone()).unwrap();
+        let asset = PreparedUpload::new(UploadKind::Metadata, data.clone()).unwrap();
         assert_eq!(dev(steps).upload_prepared(&asset).is_ok(), missing == 0);
     }
 }
+
 #[test]
 fn old_notifications_cannot_supply_ack_and_wrong_download_shift_fails() {
     use soundblaster_x4::protocol::Frame;
@@ -764,8 +760,7 @@ fn old_notifications_cannot_supply_ack_and_wrong_download_shift_fails() {
         command: 2,
         payload: vec![0x98, 0, 3, 1, 0, 0, 0, 0, 0, 0],
     });
-    let asset =
-        PreparedUpload::new(UploadKind::Metadata, vec![1, 2, 3]).unwrap();
+    let asset = PreparedUpload::new(UploadKind::Metadata, vec![1, 2, 3]).unwrap();
     assert!(d.upload_prepared(&asset).is_err());
     assert!(!d.session.usable);
     let mut steps = download_log_script(FrameWidth::Extended, 0);

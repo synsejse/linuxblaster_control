@@ -6,8 +6,7 @@ use crate::{
 
 #[test]
 fn every_fragment_boundary_and_coalesced_frames() {
-    let bytes =
-        hex("5a03023b005b020a006d0000000000000000005a11080100960a000010c1");
+    let bytes = hex("5a03023b005b020a006d0000000000000000005a11080100960a000010c1");
     let expected = vec![
         Frame {
             marker: 0x5a,
@@ -34,29 +33,25 @@ fn every_fragment_boundary_and_coalesced_frames() {
     assert!(Parser::default().feed(&hex("5b02ffff")).is_err());
     assert_eq!(Parser::default().feed(&hex("5b020a")).unwrap(), Vec::new());
 }
+
 #[test]
 fn real_unlock_vector() {
     let rows: serde_json::Value = serde_json::from_str(
-        include_str!("../tests/fixtures/unlock.json")
-            .trim_start_matches('\u{feff}'),
+        include_str!("../tests/fixtures/unlock.json").trim_start_matches('\u{feff}'),
     )
     .unwrap();
     let rows = rows.as_array().unwrap();
     let challenge = hex(rows
         .iter()
         .find(|r| {
-            r["direction"] == "rx"
-                && r["hex"].as_str().unwrap().starts_with("77686f617265796f75")
+            r["direction"] == "rx" && r["hex"].as_str().unwrap().starts_with("77686f617265796f75")
         })
         .unwrap()["hex"]
         .as_str()
         .unwrap());
     let sent = hex(rows
         .iter()
-        .find(|r| {
-            r["direction"] == "tx"
-                && r["hex"].as_str().unwrap().starts_with("756e6c6f636b")
-        })
+        .find(|r| r["direction"] == "tx" && r["hex"].as_str().unwrap().starts_with("756e6c6f636b"))
         .unwrap()["hex"]
         .as_str()
         .unwrap());
@@ -65,6 +60,7 @@ fn real_unlock_vector() {
         sent
     );
 }
+
 #[test]
 fn cold_session_handles_binary_challenge_with_embedded_crlf() {
     let mut challenge = b"whoareyou".to_vec();
@@ -91,6 +87,7 @@ fn cold_session_handles_binary_challenge_with_embedded_crlf() {
     assert_eq!(session.max_payload, 59);
     assert_eq!(writes.lock().unwrap().len(), 6);
 }
+
 #[test]
 fn warm_session_skips_unlock() {
     let port = fake(vec![
@@ -104,6 +101,7 @@ fn warm_session_skips_unlock() {
     assert!(X4::connect(port).is_ok());
     assert_eq!(writes.lock().unwrap().len(), 2);
 }
+
 #[test]
 fn timeout_invalidates_session_and_never_retries_write() {
     let port = Fake::default();
@@ -114,15 +112,16 @@ fn timeout_invalidates_session_and_never_retries_write() {
     assert!(session.set(0x39, &[0, 5, 1]).is_err());
     assert_eq!(writes.lock().unwrap().len(), 1);
 }
+
 #[test]
 fn failed_or_malformed_ack_is_not_success() {
     for response in [ack(0x39, 0x81), wire(2, &[0x39, 0])] {
-        let mut session =
-            Session::new(fake(vec![(wire(0x39, &[0, 5, 1]), response)]));
+        let mut session = Session::new(fake(vec![(wire(0x39, &[0, 5, 1]), response)]));
         assert!(session.set(0x39, &[0, 5, 1]).is_err());
         assert!(!session.usable);
     }
 }
+
 #[test]
 fn unrelated_notifications_are_retained() {
     let mut response = wire(0x2c, &[1, 4, 0, 0, 0]);
@@ -131,6 +130,7 @@ fn unrelated_notifications_are_retained() {
     assert_eq!(dev.eq_parameter(10).unwrap(), -9.0);
     assert_eq!(dev.session.notifications.front().unwrap().command, 0x2c);
 }
+
 #[test]
 fn eq_and_profile_values_are_validated_before_any_io() {
     let port = Fake::default();
@@ -146,6 +146,7 @@ fn eq_and_profile_values_are_validated_before_any_io() {
     }
     assert!(writes.lock().unwrap().is_empty());
 }
+
 #[test]
 fn feature_change_requires_support_ack_and_matching_readback() {
     for (actual, succeeds) in [(0x20, true), (0, false)] {
@@ -162,10 +163,7 @@ fn feature_change_requires_support_ack_and_matching_readback() {
         ]);
         let writes = port.writes.clone();
         let mut dev = device(port);
-        assert_eq!(
-            dev.set_feature(Feature::DirectMode, true).is_ok(),
-            succeeds
-        );
+        assert_eq!(dev.set_feature(Feature::DirectMode, true).is_ok(), succeeds);
         assert_eq!(
             writes
                 .lock()
@@ -177,6 +175,7 @@ fn feature_change_requires_support_ack_and_matching_readback() {
         );
     }
 }
+
 #[test]
 fn output_change_polls_until_the_firmware_reports_the_new_route() {
     // The X4 ACKs the switch first; speaker output reads back late.
@@ -211,12 +210,11 @@ fn output_change_polls_until_the_firmware_reports_the_new_route() {
         );
     }
 }
+
 #[test]
 fn recorded_eq_response() {
-    let rows: serde_json::Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/control-reads.json"
-    ))
-    .unwrap();
+    let rows: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/control-reads.json")).unwrap();
     let row = rows
         .as_array()
         .unwrap()
@@ -229,12 +227,11 @@ fn recorded_eq_response() {
     )]));
     assert_eq!(dev.eq_parameter(10).unwrap(), -9.0);
 }
+
 #[test]
 fn profile_assembles_captured_blocks_and_rejects_wrong_order() {
-    let rows: serde_json::Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/capabilities.json"
-    ))
-    .unwrap();
+    let rows: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/capabilities.json")).unwrap();
     let row = rows
         .as_array()
         .unwrap()

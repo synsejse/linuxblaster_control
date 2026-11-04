@@ -18,6 +18,7 @@ pub struct Fake {
     /// Fail a request with no scripted reply instead of leaving it unanswered.
     pub strict: bool,
 }
+
 impl Read for Fake {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if self.rx.is_empty() {
@@ -30,6 +31,7 @@ impl Read for Fake {
         Ok(n)
     }
 }
+
 impl Write for Fake {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.writes.lock().unwrap().push(bytes.to_vec());
@@ -39,9 +41,7 @@ impl Write for Fake {
         if self.cold && bytes == b"SW_MODE1\r\n" {
             self.responses.insert(hex("5a0300"), hex("5a03023b00"));
         }
-        if let Some(response) =
-            self.sequences.get_mut(bytes).and_then(VecDeque::pop_front)
-        {
+        if let Some(response) = self.sequences.get_mut(bytes).and_then(VecDeque::pop_front) {
             self.rx.extend(response);
         } else if let Some(response) = self.responses.get(bytes) {
             self.rx.extend(response);
@@ -53,33 +53,39 @@ impl Write for Fake {
         }
         Ok(bytes.len())
     }
+
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
+
 pub fn fake(responses: Vec<(Vec<u8>, Vec<u8>)>) -> Fake {
     Fake {
         responses: responses.into_iter().collect(),
         ..Default::default()
     }
 }
+
 pub fn device(port: Fake) -> X4<Fake> {
     X4 {
         session: Session::new(port),
         firmware: "fixture".into(),
     }
 }
+
 pub fn hex(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
         .collect()
 }
+
 pub fn wire(command: u8, payload: &[u8]) -> Vec<u8> {
     let mut bytes = vec![0x5a, command, payload.len() as u8];
     bytes.extend(payload);
     bytes
 }
+
 pub fn ack(command: u8, status: u8) -> Vec<u8> {
     wire(2, &[command, status, 0, 0, 0, 0, 0, 0, 0, 0])
 }

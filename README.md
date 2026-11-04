@@ -98,7 +98,7 @@ The workspace has two crates:
 
 [`iced_t3`](https://github.com/synsejse/iced_t3), a reusable library with T3
 Code's design and client-side window decorations for any Iced app, is a Cargo git
-dependency pinned to a full commit in `crates/app/Cargo.toml`. Workspace commands
+dependency pinned to a full commit in the workspace `Cargo.toml`. Workspace commands
 do not check it, so run its own tests in its repository.
 
 To move the pin, change `rev`, run `cargo update -p iced_t3`, and set the new
@@ -116,3 +116,5 @@ live test that backs up the device settings and restores them afterwards.
 ## License
 
 MIT, as upstream. See [LICENSE](LICENSE).
+
+See [shared code conventions](docs/conventions.md) for organization and formatting.

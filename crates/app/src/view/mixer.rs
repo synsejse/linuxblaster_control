@@ -1,6 +1,10 @@
 //! The mixer page: one section per group, one row per control.
 use super::gated;
-use crate::app::{Message, X4App, activity::Control, worker::Command};
+use crate::{
+    activity::Control,
+    app::{App, Message},
+    worker::Command,
+};
 use iced::{
     Element,
     widget::{Space, column, container, row, slider},
@@ -8,7 +12,7 @@ use iced::{
 use iced_t3::{color, font, icon, style, widget as t3};
 use soundblaster_x4::{MixerControl, MixerGroup, MixerRange};
 
-impl X4App {
+impl App {
     pub(super) fn mixer_view<'a>(
         &'a self,
         state: &'a soundblaster_x4::State,
@@ -45,23 +49,18 @@ impl X4App {
         }
         groups.into()
     }
-    fn mixer_row<'a>(
-        &'a self,
-        control: &'a MixerControl,
-    ) -> Element<'a, Message> {
+
+    fn mixer_row<'a>(&'a self, control: &'a MixerControl) -> Element<'a, Message> {
         let trailing = self.mixer_trailing(control);
-        if let (Some(range), Some(actual)) = (&control.range, control.level_db)
-        {
+        if let (Some(range), Some(actual)) = (&control.range, control.level_db) {
             self.level_row(control, range, actual, trailing)
         } else {
             self.flag_row(control, trailing)
         }
     }
+
     /// The boost switch or the mute icon at the end of a row.
-    fn mixer_trailing<'a>(
-        &'a self,
-        control: &'a MixerControl,
-    ) -> Element<'a, Message> {
+    fn mixer_trailing<'a>(&'a self, control: &'a MixerControl) -> Element<'a, Message> {
         if control.is_microphone_boost() {
             return match control.microphone_boost {
                 Some(value) => t3::switch(
@@ -90,10 +89,7 @@ impl X4App {
                     icon::VOLUME_2
                 },
                 muted,
-                self.press(
-                    available,
-                    Message::Edit(Command::MixerMute(index, !muted)),
-                ),
+                self.press(available, Message::Edit(Command::MixerMute(index, !muted))),
             ),
             if !available {
                 "Mute unavailable".to_owned()
@@ -105,6 +101,7 @@ impl X4App {
             t3::Position::Left,
         )
     }
+
     /// A control with no level to adjust.
     fn flag_row<'a>(
         &'a self,
@@ -121,11 +118,7 @@ impl X4App {
             trailing,
         );
         if !boost {
-            t3::setting(
-                &control.name,
-                t3::muted("No adjustable level"),
-                trailing,
-            )
+            t3::setting(&control.name, t3::muted("No adjustable level"), trailing)
         } else if control.microphone_boost.is_none() {
             t3::setting(
                 &control.name,
@@ -136,6 +129,7 @@ impl X4App {
             t3::setting_titled(&control.name, trailing)
         }
     }
+
     fn level_row<'a>(
         &'a self,
         control: &'a MixerControl,
@@ -151,10 +145,7 @@ impl X4App {
             row![
                 column![
                     t3::text(&control.name, 14).font(font::MEDIUM),
-                    t3::muted(format!(
-                        "{:.0} to {:.0} dB",
-                        range.min_db, range.max_db
-                    ))
+                    t3::muted(format!("{:.0} to {:.0} dB", range.min_db, range.max_db))
                 ]
                 .spacing(2)
                 .width(136),
@@ -168,21 +159,17 @@ impl X4App {
                 .step(range.step_db.max(0.01))
                 .height(22)
                 .style(style::slider(enabled)),
-                container(t3::text(format!("{value:.1} dB"), 12).color(
-                    if changed {
-                        color::WARNING
-                    } else {
-                        color::FOREGROUND
-                    }
-                ))
+                container(t3::text(format!("{value:.1} dB"), 12).color(if changed {
+                    color::WARNING
+                } else {
+                    color::FOREGROUND
+                }))
                 .align_right(60),
-                container(trailing).align_right(
-                    if control.is_microphone_boost() {
-                        96
-                    } else {
-                        28
-                    }
-                ),
+                container(trailing).align_right(if control.is_microphone_boost() {
+                    96
+                } else {
+                    28
+                }),
             ]
             .spacing(12)
             .align_y(iced::Center),

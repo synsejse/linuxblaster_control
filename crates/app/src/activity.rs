@@ -1,5 +1,5 @@
 //! What the app is doing to the device, and what to say about it.
-use super::worker::Command;
+use crate::worker::Command;
 use soundblaster_x4::{Feature, Output, State, SxfiMode};
 use std::time::{Duration, Instant};
 
@@ -43,6 +43,7 @@ pub fn output_name(output: Output) -> &'static str {
         Output::Headphone => "Headphones",
     }
 }
+
 pub fn sxfi_name(mode: SxfiMode) -> &'static str {
     match mode {
         SxfiMode::Off => "Off",
@@ -52,17 +53,14 @@ pub fn sxfi_name(mode: SxfiMode) -> &'static str {
 }
 
 impl Activity {
-    fn new(
-        control: Control,
-        progress: impl Into<String>,
-        done: impl Into<String>,
-    ) -> Self {
+    fn new(control: Control, progress: impl Into<String>, done: impl Into<String>) -> Self {
         Self {
             control,
             progress: progress.into(),
             done: done.into(),
         }
     }
+
     fn switch(control: Control, name: &str, on: bool) -> Self {
         let state = if on { "on" } else { "off" };
         Self::new(
@@ -71,6 +69,7 @@ impl Activity {
             format!("{name} {state}"),
         )
     }
+
     /// How `command` reads, using names from the last known `state`.
     pub fn describe(command: &Command, state: Option<&State>) -> Self {
         let mixer_name = |index: u8| {
@@ -79,21 +78,13 @@ impl Activity {
                 .map_or("Level", |c| c.name.as_str())
         };
         match command {
-            Command::Apply(..) => Self::new(
-                Control::Apply,
-                "Applying changes…",
-                "Changes applied",
-            ),
-            Command::Refresh if state.is_none() => Self::new(
-                Control::Refresh,
-                "Connecting…",
-                "Connected to your X4",
-            ),
-            Command::Refresh => Self::new(
-                Control::Refresh,
-                "Reading the X4…",
-                "Device state updated",
-            ),
+            Command::Apply(..) => Self::new(Control::Apply, "Applying changes…", "Changes applied"),
+            Command::Refresh if state.is_none() => {
+                Self::new(Control::Refresh, "Connecting…", "Connected to your X4")
+            }
+            Command::Refresh => {
+                Self::new(Control::Refresh, "Reading the X4…", "Device state updated")
+            }
             Command::Output(output) => {
                 let name = output_name(*output);
                 Self::new(
@@ -120,9 +111,7 @@ impl Activity {
             }
             Command::Profile(_, index) => {
                 let name = state
-                    .and_then(|s| {
-                        s.eq_profiles.iter().find(|p| p.index == *index)
-                    })
+                    .and_then(|s| s.eq_profiles.iter().find(|p| p.index == *index))
                     .map_or("Profile", |p| p.name.as_str());
                 Self::new(
                     Control::Profile(*index),

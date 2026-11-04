@@ -1,8 +1,6 @@
 //! Explicitly changes supported settings, checks readback, and restores each item.
 //! Run only with --exercise-and-restore; close other controllers first.
-use soundblaster_x4::{
-    Equalizer, Error, Feature, Output, Port, State, SxfiMode, X4, open,
-};
+use soundblaster_x4::{Equalizer, Error, Feature, Output, Port, State, SxfiMode, X4, open};
 use std::{error, io::Write};
 
 /// The EQ slots as they were before the exercise.
@@ -11,6 +9,7 @@ type Profiles = Vec<(u8, Equalizer)>;
 fn invalid(message: &str) -> Error {
     Error::Invalid(message.into())
 }
+
 /// Select, edit and restore each slot, then walk the processing modes and mixer.
 fn exercise(
     d: &mut X4<Port>,
@@ -53,6 +52,7 @@ fn exercise(
     }
     Ok(())
 }
+
 /// Put everything back, whether or not the exercise finished.
 fn restore(
     d: &mut X4<Port>,
@@ -96,12 +96,12 @@ fn restore(
     }
     d.restore_mixer_channels(mixer_channels)
 }
+
 fn main() -> Result<(), Box<dyn error::Error>> {
     if std::env::args().nth(1).as_deref() != Some("--exercise-and-restore") {
-        return Err(invalid(
-            "Requires --exercise-and-restore; this changes live audio settings",
-        )
-        .into());
+        return Err(
+            invalid("Requires --exercise-and-restore; this changes live audio settings").into(),
+        );
     }
     let mut d = open(None)?;
     let original = d.state()?;
@@ -113,10 +113,9 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         || original.feature(Feature::DirectMode)
         || original.sxfi != Some(SxfiMode::Off)
     {
-        return Err(invalid(
-            "Hardware exercise expects headphones, Direct Mode off and SXFI off",
-        )
-        .into());
+        return Err(
+            invalid("Hardware exercise expects headphones, Direct Mode off and SXFI off").into(),
+        );
     }
     // Record all EQ slots before any changes.
     let mut profiles = Vec::new();
@@ -127,9 +126,8 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         ));
     }
     let backup = serde_json::json!({"state":original,"profiles":profiles,"latent_sxfi_mode":latent_mode,"mixer_channels":mixer_channels});
-    let path = std::env::var("X4_CHECK_BACKUP").map_err(|_| {
-        invalid("Set X4_CHECK_BACKUP to a new backup file path")
-    })?;
+    let path = std::env::var("X4_CHECK_BACKUP")
+        .map_err(|_| invalid("Set X4_CHECK_BACKUP to a new backup file path"))?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

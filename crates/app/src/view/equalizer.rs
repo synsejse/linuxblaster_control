@@ -1,12 +1,10 @@
 //! The device settings, the EQ section and the docked apply bar.
 use super::{PAGE_WIDTH, gated};
 use crate::{
-    app::{
-        Message, X4App,
-        activity::Control,
-        worker::{Command, EqContext},
-    },
+    activity::Control,
+    app::{App, Message},
     curve::Curve,
+    worker::{Command, EqContext},
 };
 use iced::{
     Element,
@@ -18,19 +16,16 @@ use soundblaster_x4::{EQ_LIMIT_DB, EqProfileInfo, Equalizer, Feature, State};
 
 const EQ_RANGE: std::ops::RangeInclusive<f32> = -EQ_LIMIT_DB..=EQ_LIMIT_DB;
 const BANDS: [&str; 10] = [
-    "31 Hz", "62 Hz", "125 Hz", "250 Hz", "500 Hz", "1 kHz", "2 kHz", "4 kHz",
-    "8 kHz", "16 kHz",
+    "31 Hz", "62 Hz", "125 Hz", "250 Hz", "500 Hz", "1 kHz", "2 kHz", "4 kHz", "8 kHz", "16 kHz",
 ];
 
-fn number_input(
-    _: &iced::Theme,
-    _: iced_aw::style::Status,
-) -> iced_aw::style::number_input::Style {
+fn number_input(_: &iced::Theme, _: iced_aw::style::Status) -> iced_aw::style::number_input::Style {
     iced_aw::style::number_input::Style {
         button_background: None,
         icon_color: color::MUTED,
     }
 }
+
 /// A typed gain, shown without step buttons.
 fn gain_input<'a>(
     value: f32,
@@ -45,13 +40,9 @@ fn gain_input<'a>(
         .style(number_input)
 }
 
-impl X4App {
-    pub(super) fn eq_view<'a>(
-        &'a self,
-        state: &'a State,
-    ) -> Element<'a, Message> {
-        let enabled =
-            !state.feature(Feature::DirectMode) && !self.context_pending();
+impl App {
+    pub(super) fn eq_view<'a>(&'a self, state: &'a State) -> Element<'a, Message> {
+        let enabled = !state.feature(Feature::DirectMode) && !self.context_pending();
         let mut rows = match &self.draft {
             Some(eq) => {
                 vec![self.bands_view(state, eq), self.preamp_view(eq, enabled)]
@@ -87,23 +78,19 @@ impl X4App {
         }
         t3::section(
             match state.active_profile() {
-                Some(profile) => {
-                    t3::section_heading("Equalizer", &profile.name)
-                }
+                Some(profile) => t3::section_heading("Equalizer", &profile.name),
                 None => t3::section_title("Equalizer").into(),
             },
             Some(t3::switch(
                 "eq-enabled",
                 Some("Enabled"),
                 self.draft.as_ref().is_some_and(|e| e.enabled),
-                self.on_toggle(
-                    enabled && self.draft.is_some(),
-                    Message::EqEnabled,
-                ),
+                self.on_toggle(enabled && self.draft.is_some(), Message::EqEnabled),
             )),
             rows,
         )
     }
+
     fn profile_choice<'a>(
         &'a self,
         state: &'a State,
@@ -135,13 +122,8 @@ impl X4App {
     }
 
     /// The curve above its ten faders.
-    fn bands_view(
-        &self,
-        state: &State,
-        eq: &Equalizer,
-    ) -> Element<'_, Message> {
-        let enabled =
-            !state.feature(Feature::DirectMode) && !self.context_pending();
+    fn bands_view(&self, state: &State, eq: &Equalizer) -> Element<'_, Message> {
+        let enabled = !state.feature(Feature::DirectMode) && !self.context_pending();
         // These change which curve is on the device, so the one shown is stale.
         let reloading = self.pending.as_ref().is_some_and(|a| {
             matches!(
@@ -199,11 +181,8 @@ impl X4App {
         .padding([14, 16])
         .into()
     }
-    fn preamp_view(
-        &self,
-        eq: &Equalizer,
-        enabled: bool,
-    ) -> Element<'_, Message> {
+
+    fn preamp_view(&self, eq: &Equalizer, enabled: bool) -> Element<'_, Message> {
         let preamp = gated(enabled && !self.busy(), Message::Preamp);
         // Hide floating-point readback noise without changing the EQ draft.
         let display_db = (eq.preamp_db * 100.0).round() / 100.0;
@@ -230,11 +209,10 @@ impl X4App {
             .align_y(iced::Center),
         )
     }
+
     /// Only pending edits and an active Apply need a docked bar.
     pub(super) fn apply_bar(&self) -> Option<Element<'_, Message>> {
-        if self.state.is_none()
-            || (!self.has_changes() && !self.in_flight(Control::Apply))
-        {
+        if self.state.is_none() || (!self.has_changes() && !self.in_flight(Control::Apply)) {
             return None;
         }
         let working = self.in_flight(Control::Apply);
@@ -270,10 +248,7 @@ impl X4App {
                 } else {
                     t3::primary(
                         "Apply",
-                        (dirty
-                            && invalid.is_none()
-                            && !self.busy()
-                            && !self.offline)
+                        (dirty && invalid.is_none() && !self.busy() && !self.offline)
                             .then_some(Message::Apply),
                     )
                 },

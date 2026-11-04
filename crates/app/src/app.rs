@@ -1,14 +1,11 @@
 //! Application state and message handling.
-mod activity;
-mod draft;
 #[cfg(test)]
-mod render_tests;
-#[cfg(test)]
-mod tests;
-mod view;
-mod worker;
+pub(crate) mod tests;
 
-use activity::{Activity, CONFIRMATION, Confirmed, Control};
+use crate::{
+    activity::{Activity, CONFIRMATION, Confirmed, Control},
+    worker,
+};
 use iced::{
     Subscription, Task,
     keyboard::{self, Key, Modifiers, key::Named},
@@ -24,15 +21,6 @@ use worker::{Command, Completion, EqContext, Event};
 
 /// How often to look for worker events and expire confirmations.
 const TICK: Duration = Duration::from_millis(100);
-
-/// The app icon, also used by the window.
-pub fn icon() -> image::RgbaImage {
-    image::load_from_memory(include_bytes!(
-        "../../../packaging/linuxblaster-control.png"
-    ))
-    .expect("bundled app icon")
-    .into_rgba8()
-}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub enum Page {
@@ -59,31 +47,33 @@ pub enum Message {
     Key(Key, Modifiers),
 }
 
-pub struct X4App {
-    offline: bool,
-    tx: Sender<Command>,
-    rx: Receiver<Event>,
-    state: Option<State>,
-    preview: Option<State>,
-    control_drafts: Vec<Command>,
-    draft: Option<Equalizer>,
-    draft_context: Option<EqContext>,
-    dirty: bool,
-    pending: Option<Activity>,
-    confirmed: Option<Confirmed>,
-    error: Option<String>,
-    notice: Option<String>,
-    page: Page,
-    mixer_drafts: BTreeMap<u8, f32>,
-    mixer_editing: BTreeSet<u8>,
+pub struct App {
+    pub(crate) offline: bool,
+    pub(crate) tx: Sender<Command>,
+    pub(crate) rx: Receiver<Event>,
+    pub(crate) state: Option<State>,
+    pub(crate) preview: Option<State>,
+    pub(crate) control_drafts: Vec<Command>,
+    pub(crate) draft: Option<Equalizer>,
+    pub(crate) draft_context: Option<EqContext>,
+    pub(crate) dirty: bool,
+    pub(crate) pending: Option<Activity>,
+    pub(crate) confirmed: Option<Confirmed>,
+    pub(crate) error: Option<String>,
+    pub(crate) notice: Option<String>,
+    pub(crate) page: Page,
+    pub(crate) mixer_drafts: BTreeMap<u8, f32>,
+    pub(crate) mixer_editing: BTreeSet<u8>,
 }
-impl X4App {
+
+impl App {
     pub fn new(port: Option<String>) -> Self {
         let (tx, rx) = worker::spawn(port);
         let mut app = Self::with_channels(tx, rx);
         app.send(Command::Refresh);
         app
     }
+
     /// An offline preview of the bundled fixture.
     pub fn demo() -> Self {
         let (tx, _) = mpsc::channel();
@@ -91,13 +81,13 @@ impl X4App {
         let mut app = Self::with_channels(tx, rx);
         app.offline = true;
         let mut state: State =
-            serde_json::from_str(include_str!("../fixtures/demo.json"))
-                .expect("offline fixture");
+            serde_json::from_str(include_str!("../fixtures/demo.json")).expect("offline fixture");
         state.firmware = "Offline preview".into();
         app.on_state(state, Completion::Refresh);
         app
     }
-    fn with_channels(tx: Sender<Command>, rx: Receiver<Event>) -> Self {
+
+    pub(crate) fn with_channels(tx: Sender<Command>, rx: Receiver<Event>) -> Self {
         Self {
             offline: false,
             tx,
@@ -117,7 +107,8 @@ impl X4App {
             mixer_editing: BTreeSet::new(),
         }
     }
-    fn send(&mut self, command: Command) {
+
+    pub(crate) fn send(&mut self, command: Command) {
         // Also guard against several widgets firing in the same frame.
         if self.offline || self.busy() {
             return;
@@ -129,17 +120,19 @@ impl X4App {
             self.error = None;
             self.notice = None;
         } else {
-            self.error =
-                Some("Device worker stopped. Restart the application.".into());
+            self.error = Some("Device worker stopped. Restart the application.".into());
         }
     }
-    fn busy(&self) -> bool {
+
+    pub(crate) fn busy(&self) -> bool {
         self.pending.is_some()
     }
-    fn in_flight(&self, control: Control) -> bool {
+
+    pub(crate) fn in_flight(&self, control: Control) -> bool {
         self.pending.as_ref().is_some_and(|a| a.control == control)
     }
-    fn events(&mut self) {
+
+    pub(crate) fn events(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 Event::State(state, completed) => {
@@ -149,7 +142,8 @@ impl X4App {
             }
         }
     }
-    fn on_state(&mut self, state: State, completed: Completion) {
+
+    pub(crate) fn on_state(&mut self, state: State, completed: Completion) {
         let applied = matches!(completed, Completion::Applied);
         if applied || matches!(completed, Completion::Refresh) {
             self.control_drafts.clear();
@@ -157,20 +151,14 @@ impl X4App {
             self.mixer_drafts.clear();
         }
         let context = EqContext::from_state(&state);
-        let context_changed =
-            self.draft_context.is_some_and(|old| old != context);
+        let context_changed = self.draft_context.is_some_and(|old| old != context);
         let reset = !self.dirty
             || context_changed
             || matches!(
                 completed,
-                Completion::Refresh
-                    | Completion::EqApplied
-                    | Completion::Applied
+                Completion::Refresh | Completion::EqApplied | Completion::Applied
             );
-        if context_changed
-            && !applied
-            && (self.dirty || !self.control_drafts.is_empty())
-        {
+        if context_changed && !applied && (self.dirty || !self.control_drafts.is_empty()) {
             self.control_drafts.clear();
             self.notice = Some("The output, sound mode or profile changed. Pending device and EQ edits were discarded; the current device state is shown.".into());
         }
@@ -198,7 +186,8 @@ impl X4App {
             });
         }
     }
-    fn on_error(&mut self, error: String) {
+
+    pub(crate) fn on_error(&mut self, error: String) {
         self.error = Some(error);
         self.state = None;
         self.preview = None;
@@ -211,6 +200,7 @@ impl X4App {
         self.mixer_drafts.clear();
         self.mixer_editing.clear();
     }
+
     #[expect(
         clippy::unused_self,
         reason = "Iced calls this with the state, even when nothing depends on it"
@@ -219,15 +209,14 @@ impl X4App {
         Subscription::batch([
             iced::time::every(TICK).map(|_| Message::Tick),
             iced::event::listen_with(|event, _, _| match event {
-                iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                    key,
-                    modifiers,
-                    ..
-                }) => Some(Message::Key(key, modifiers)),
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                    Some(Message::Key(key, modifiers))
+                }
                 _ => None,
             }),
         ])
     }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
@@ -267,22 +256,22 @@ impl X4App {
         }
         Task::none()
     }
+
     fn on_key(&mut self, key: &Key, modifiers: Modifiers) -> Task<Message> {
         match key {
             Key::Named(Named::Tab) if modifiers.shift() => {
                 iced::widget::operation::focus_previous()
             }
             Key::Named(Named::Tab) => iced::widget::operation::focus_next(),
-            Key::Character(key)
-                if modifiers.control() && key.eq_ignore_ascii_case("r") =>
-            {
+            Key::Character(key) if modifiers.control() && key.eq_ignore_ascii_case("r") => {
                 self.send(Command::Refresh);
                 Task::none()
             }
             _ => Task::none(),
         }
     }
-    fn edit_eq(&mut self, edit: impl FnOnce(&mut Equalizer)) {
+
+    pub(crate) fn edit_eq(&mut self, edit: impl FnOnce(&mut Equalizer)) {
         if self.busy() || self.context_pending() {
             return;
         }

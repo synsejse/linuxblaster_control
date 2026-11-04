@@ -1,8 +1,7 @@
 use iced::{
     Color, Point, Rectangle, Renderer, Theme, alignment, mouse,
     widget::canvas::{
-        self, Frame, Geometry, LineCap, LineDash, LineJoin, Path, Stroke, Text,
-        gradient,
+        self, Frame, Geometry, LineCap, LineDash, LineJoin, Path, Stroke, Text, gradient,
     },
 };
 use iced_t3::{color, font};
@@ -13,6 +12,7 @@ const DASH: LineDash<'static> = LineDash {
     segments: &[3.0, 5.0],
     offset: 0,
 };
+
 /// A band this close to 0 dB counts as flat and gets a quiet marker.
 const FLAT_DB: f32 = 0.05;
 
@@ -31,9 +31,11 @@ impl Plot {
     fn x(self, band: f32) -> f32 {
         (band + 0.5) / 10.0 * self.0.width
     }
+
     fn y(self, db: f32) -> f32 {
         TOP + (12.0 - db) / 24.0 * (self.0.height - TOP - BOTTOM)
     }
+
     /// The height of `db` on screen, as opposed to its position.
     fn pixels(self, db: f32) -> f32 {
         db / 24.0 * (self.0.height - TOP - BOTTOM)
@@ -48,8 +50,7 @@ fn slopes(gains: &[f32; 10]) -> [f32; 10] {
     slopes[0] = gains[1] - gains[0];
     slopes[9] = gains[9] - gains[8];
     for i in 1..9 {
-        let (before, after) =
-            (gains[i] - gains[i - 1], gains[i + 1] - gains[i]);
+        let (before, after) = (gains[i] - gains[i - 1], gains[i + 1] - gains[i]);
         if before * after > 0.0 {
             slopes[i] = 2.0 * before * after / (before + after);
         }
@@ -85,25 +86,22 @@ impl Curve {
             plot.y(self.bands[usize::from(band)]),
         )
     }
+
     /// Cubic segments in pixels; a slope of one band's rise spans a third of it.
     fn trace(&self, plot: Plot, builder: &mut canvas::path::Builder) {
         let slopes = slopes(&self.bands);
         let step = plot.x(1.0) - plot.x(0.0);
         for band in 0..9 {
-            let (from, to) =
-                (self.point(plot, band), self.point(plot, band + 1));
-            let (start, end) =
-                (slopes[usize::from(band)], slopes[usize::from(band) + 1]);
+            let (from, to) = (self.point(plot, band), self.point(plot, band + 1));
+            let (start, end) = (slopes[usize::from(band)], slopes[usize::from(band) + 1]);
             builder.bezier_curve_to(
-                Point::new(
-                    from.x + step / 3.0,
-                    from.y - plot.pixels(start) / 3.0,
-                ),
+                Point::new(from.x + step / 3.0, from.y - plot.pixels(start) / 3.0),
                 Point::new(to.x - step / 3.0, to.y + plot.pixels(end) / 3.0),
                 to,
             );
         }
     }
+
     /// Strongest at the extremes and gone at 0 dB, so boosts and cuts both read.
     /// Opaque on purpose: with MSAA on, an RX 9060 XT draws translucent gradient
     /// stops with a hard step at one alpha value. The grid goes on top instead.
@@ -126,6 +124,7 @@ impl Curve {
             fade,
         );
     }
+
     fn draw_line(&self, frame: &mut Frame, plot: Plot, tint: Color) {
         let curve = Path::new(|p| {
             p.move_to(self.point(plot, 0));
@@ -142,6 +141,7 @@ impl Curve {
         );
         frame.stroke(&curve, line.with_width(2.0).with_color(tint));
     }
+
     fn draw_markers(&self, frame: &mut Frame, plot: Plot, tint: Color) {
         for (band, gain) in (0..).zip(self.bands) {
             let center = self.point(plot, band);
@@ -278,6 +278,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn a_flat_curve_stays_flat() {
         assert_eq!(slopes(&[3.0; 10]), [0.0; 10]);

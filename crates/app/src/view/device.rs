@@ -1,35 +1,27 @@
 //! Output and processing settings, separate from the EQ editor.
-use crate::app::{
-    Message, X4App,
+use crate::{
     activity::{Control, output_name, sxfi_name},
+    app::{App, Message},
     worker::{Command, EqContext},
 };
 use iced::Element;
 use iced_t3::widget as t3;
 use soundblaster_x4::{Feature, Output, State, SxfiMode};
 
-impl X4App {
-    pub(super) fn device_view<'a>(
-        &'a self,
-        state: &'a State,
-    ) -> Element<'a, Message> {
+impl App {
+    pub(super) fn device_view<'a>(&'a self, state: &'a State) -> Element<'a, Message> {
         let context = EqContext::from_state(state);
-        let sxfi_allowed = state.sxfi.is_some()
-            && state.output == Output::Headphone
-            && !context.direct;
-        let modes =
-            [SxfiMode::Off, SxfiMode::On, SxfiMode::Battle].map(|mode| {
-                let label = sxfi_name(mode);
-                t3::segment(
-                    label,
-                    label,
-                    state.sxfi == Some(mode),
-                    self.press(
-                        sxfi_allowed,
-                        Message::Edit(Command::Sxfi(context, mode)),
-                    ),
-                )
-            });
+        let sxfi_allowed =
+            state.sxfi.is_some() && state.output == Output::Headphone && !context.direct;
+        let modes = [SxfiMode::Off, SxfiMode::On, SxfiMode::Battle].map(|mode| {
+            let label = sxfi_name(mode);
+            t3::segment(
+                label,
+                label,
+                state.sxfi == Some(mode),
+                self.press(sxfi_allowed, Message::Edit(Command::Sxfi(context, mode))),
+            )
+        });
         let sxfi_detail = if context.direct {
             t3::warning("Turn off Direct mode to use Super X-Fi.")
         } else if state.output == Output::Speaker {
@@ -78,8 +70,7 @@ impl X4App {
                     feature_switch(
                         "direct-mode",
                         Feature::DirectMode,
-                        !self.offline
-                            && state.writable_feature(Feature::DirectMode),
+                        !self.offline && state.writable_feature(Feature::DirectMode),
                     ),
                 ),
                 t3::setting(
@@ -89,8 +80,7 @@ impl X4App {
                         "headphone-gain",
                         Feature::HeadphoneHighGain,
                         !self.offline
-                            && state
-                                .writable_feature(Feature::HeadphoneHighGain)
+                            && state.writable_feature(Feature::HeadphoneHighGain)
                             && state.output == Output::Headphone,
                     ),
                 ),

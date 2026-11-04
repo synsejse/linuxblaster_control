@@ -13,6 +13,7 @@ fn strict() -> Fake {
         ..Default::default()
     }
 }
+
 fn profiles_fake() -> Fake {
     let mut fake = strict();
     fake.responses.insert(
@@ -32,6 +33,7 @@ fn profiles_fake() -> Fake {
     }
     fake
 }
+
 fn add_context(fake: &mut Fake, output: Output, direct: bool, sxfi: bool) {
     fake.responses.insert(
         wire(0x2c, &[1]),
@@ -53,6 +55,7 @@ fn add_context(fake: &mut Fake, output: Output, direct: bool, sxfi: bool) {
     fake.responses
         .insert(wire(0x6f, &[0x0d]), hex("5a6f0b0d4d562020303030322e30"));
 }
+
 fn assert_no_setting_writes(writes: &Writes) {
     for frame in writes.lock().unwrap().iter() {
         let is_write = match frame.get(1).copied() {
@@ -84,6 +87,7 @@ fn captured_profile_count_and_utf16_names() {
     );
     assert_eq!(writes.lock().unwrap().len(), 5);
 }
+
 #[test]
 fn profile_name_decoder_handles_utf16_surrogate_pairs() {
     let mut fake = profiles_fake();
@@ -97,6 +101,7 @@ fn profile_name_decoder_handles_utf16_surrogate_pairs() {
         "Č🎵"
     );
 }
+
 #[test]
 fn profile_count_and_name_lengths_are_validated() {
     let mut fake = profiles_fake();
@@ -112,6 +117,7 @@ fn profile_count_and_name_lengths_are_validated() {
         .insert(hex("5a1803010200"), hex("5a18080102000505004d00"));
     assert!(device(fake).eq_profiles(Output::Headphone).is_err());
 }
+
 #[test]
 fn sxfi_state_uses_capability_order_and_decodes_modes() {
     for (mask, mode, expected) in [
@@ -139,6 +145,7 @@ fn sxfi_state_uses_capability_order_and_decodes_modes() {
         );
     }
 }
+
 #[test]
 fn sxfi_unknown_mode_is_not_reported_as_on() {
     let mut fake = strict();
@@ -147,6 +154,7 @@ fn sxfi_unknown_mode_is_not_reported_as_on() {
         .insert(wire(0x6f, &[0x0d]), wire(0x6f, b"\x0dXXXX0002.0"));
     assert!(device(fake).sxfi().is_err());
 }
+
 #[test]
 fn captured_pending_ack_then_final_ack_does_not_resend() {
     let command = hex("5a6f050c4d562020");
@@ -162,6 +170,7 @@ fn captured_pending_ack_then_final_ack_does_not_resend() {
     assert!(session.usable);
     assert_eq!(session.notifications.front().unwrap().command, 0x26);
 }
+
 #[test]
 fn pending_failure_or_wrong_terminal_selector_invalidates_session() {
     for final_payload in [
@@ -182,6 +191,7 @@ fn pending_failure_or_wrong_terminal_selector_invalidates_session() {
         assert_eq!(writes.lock().unwrap().len(), 1);
     }
 }
+
 #[test]
 fn invalid_profile_index_or_sxfi_context_never_writes_settings() {
     for (index, sxfi) in [(4, false), (3, false), (0, true)] {
@@ -197,11 +207,10 @@ fn invalid_profile_index_or_sxfi_context_never_writes_settings() {
     assert!(device(fake).set_eq_profile(0).is_err());
     assert_no_setting_writes(&writes);
 }
+
 #[test]
 fn sxfi_write_requires_headphone_output_and_direct_mode_off() {
-    for (output, direct) in
-        [(Output::Speaker, false), (Output::Headphone, true)]
-    {
+    for (output, direct) in [(Output::Speaker, false), (Output::Headphone, true)] {
         let mut fake = strict();
         add_context(&mut fake, output, direct, false);
         let writes = fake.writes.clone();
@@ -209,6 +218,7 @@ fn sxfi_write_requires_headphone_output_and_direct_mode_off() {
         assert_no_setting_writes(&writes);
     }
 }
+
 #[test]
 fn sxfi_button_write_checks_state_bit_and_poisons_on_mismatch() {
     for (actual, succeeds) in [(1, true), (0, false)] {

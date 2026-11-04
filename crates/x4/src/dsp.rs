@@ -13,6 +13,7 @@ pub enum ProfileBank {
     Headphone,
     Current,
 }
+
 impl ProfileBank {
     pub(crate) fn flags(self) -> u8 {
         match self {
@@ -22,6 +23,7 @@ impl ProfileBank {
         }
     }
 }
+
 impl From<Output> for ProfileBank {
     fn from(output: Output) -> Self {
         match output {
@@ -30,32 +32,38 @@ impl From<Output> for ProfileBank {
         }
     }
 }
+
 /// Command17 flags bit0: writable cache=0, immutable factory data=1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileSource {
     Writable,
     Factory,
 }
+
 impl ProfileSource {
     pub(crate) fn flag(self) -> u8 {
         u8::from(self == Self::Factory)
     }
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Parameter {
     pub module: u8,
     pub parameter: u8,
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DspValue {
     pub parameter: Parameter,
     pub bits: u32,
 }
+
 impl DspValue {
     pub fn value(self) -> f32 {
         f32::from_bits(self.bits)
     }
 }
+
 pub fn decode_fragment(p: &[u8]) -> Result<(bool, Vec<DspValue>)> {
     if p.len() < 2
         || p[0] > 9
@@ -81,11 +89,13 @@ pub fn decode_fragment(p: &[u8]) -> Result<(bool, Vec<DspValue>)> {
             .collect(),
     ))
 }
+
 #[derive(Debug, Clone, Copy)]
 pub enum ProfileField {
     Name,
     Auxiliary,
 }
+
 impl ProfileField {
     /// Maximum characters (two wire bytes each).
     fn limit(self) -> usize {
@@ -94,6 +104,7 @@ impl ProfileField {
             Self::Auxiliary => 8,
         }
     }
+
     /// Command `18` selector for (write, read, info).
     fn selectors(self) -> (u8, u8, u8) {
         match self {
@@ -102,20 +113,18 @@ impl ProfileField {
         }
     }
 }
+
 pub(crate) fn check_profile_index(index: u8) -> Result<()> {
     if index > 3 {
         return Err(invalid("Profile index outside 0..3"));
     }
     Ok(())
 }
+
 impl<T: Read + Write> X4<T> {
     /// `11 count,(module,param)*` reads current values; `alternate=true` uses
     /// `13` for defaults. Replies are `count,more,(module,param,value32le)*`.
-    pub fn dsp_read(
-        &mut self,
-        parameters: &[Parameter],
-        alternate: bool,
-    ) -> Result<Vec<DspValue>> {
+    pub fn dsp_read(&mut self, parameters: &[Parameter], alternate: bool) -> Result<Vec<DspValue>> {
         if parameters.is_empty() || parameters.len() > 28 {
             return Err(invalid("DSP query count 1..28"));
         }
@@ -153,6 +162,7 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(out)
     }
+
     /// `12 count,(module,param,value32le)*`: ACK confirms cache/queue acceptance,
     /// not DSP consumption. Failure can leave partially changed cached values.
     pub fn dsp_write(&mut self, values: &[DspValue]) -> Result<()> {
@@ -169,6 +179,7 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(())
     }
+
     pub fn dsp_range(&mut self) -> Result<[f32; 3]> {
         let p = self.fixed_selector(0x15, &[0], 16)?;
         if p[..4] != [0, 1, 0x96, 0x0b] {
@@ -176,13 +187,9 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(std::array::from_fn(|i| f32::from_bits(word(&p, 4 + i * 4))))
     }
+
     /// Firmware stored profile bytes, independent of app preset names.
-    pub fn write_profile_data(
-        &mut self,
-        output: Output,
-        index: u8,
-        data: &[u8],
-    ) -> Result<()> {
+    pub fn write_profile_data(&mut self, output: Output, index: u8, data: &[u8]) -> Result<()> {
         check_profile_index(index)?;
         let count = data
             .first_chunk::<4>()
@@ -209,28 +216,21 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(())
     }
-    pub fn profile_field_info(
-        &mut self,
-        index: u8,
-        field: ProfileField,
-    ) -> Result<Vec<u8>> {
+
+    pub fn profile_field_info(&mut self, index: u8, field: ProfileField) -> Result<Vec<u8>> {
         check_profile_index(index)?;
         self.fixed_selector(0x18, &[field.selectors().2, 2, index], 7)
     }
+
     /// Two-byte wire characters; firmware stores only low bytes in both banks.
-    pub fn profile_field(
-        &mut self,
-        index: u8,
-        field: ProfileField,
-    ) -> Result<Vec<u8>> {
+    pub fn profile_field(&mut self, index: u8, field: ProfileField) -> Result<Vec<u8>> {
         check_profile_index(index)?;
         let prefix = [field.selectors().1, 2, index];
         let mut p = self.selector(0x18, &prefix)?;
         let mut out = vec![];
         let mut total = None;
         for _ in 0..32 {
-            if p.len() < 6 || p[..3] != prefix || p[5] as usize * 2 != out.len()
-            {
+            if p.len() < 6 || p[..3] != prefix || p[5] as usize * 2 != out.len() {
                 return Err(invalid("Profile field offset/identity"));
             }
             let size = (p[3] & 127) as usize * 2;
@@ -256,6 +256,7 @@ impl<T: Read + Write> X4<T> {
         }
         Err(invalid("Too many field blocks"))
     }
+
     /// Header: selector,02,index,total|more,count,offset, then two-byte characters.
     /// Nonfinal ACK80 retains bytes and is expected, not rollback. Both banks change.
     pub fn write_profile_field_block(
@@ -276,8 +277,7 @@ impl<T: Read + Write> X4<T> {
         {
             return Err(invalid("Profile field bounds or non-byte character"));
         }
-        let mut p =
-            vec![field.selectors().0, 2, index, total_more, count, offset];
+        let mut p = vec![field.selectors().0, 2, index, total_more, count, offset];
         p.extend(data);
         self.session.prepare(0x18, &p)?;
         let reply = self
@@ -290,6 +290,7 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(())
     }
+
     /// Write a byte-string field using the firmware's shared sequential assembly.
     pub fn write_profile_field(
         &mut self,
@@ -323,6 +324,7 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(())
     }
+
     /// Firmware flags/index fields, not local app profile metadata.
     pub fn set_profile_information(&mut self, fields: [u8; 4]) -> Result<()> {
         if fields[0] & 1 != 0 || fields[1] > 3 {

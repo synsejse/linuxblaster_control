@@ -5,10 +5,9 @@
     reason = "Window sizes and click positions are small whole numbers"
 )]
 
-use super::{
-    Message, Page, X4App,
+use crate::{
     activity::{Activity, Confirmed, Control},
-    tests,
+    app::{App, Message, Page, tests},
     worker::{Command, Completion, Event},
 };
 use iced::{
@@ -32,6 +31,7 @@ fn load_fonts() {
         fonts.load_font(bytes.into());
     }
 }
+
 fn renderer() -> iced::Renderer {
     pollster::block_on(<iced::Renderer as Headless>::new(
         font::REGULAR,
@@ -40,24 +40,21 @@ fn renderer() -> iced::Renderer {
     ))
     .expect("software renderer")
 }
+
 /// Render `app` at `width`×`height` and return its RGBA pixels.
-fn screenshot(app: &X4App, width: u32, height: u32) -> Vec<u8> {
+fn screenshot(app: &App, width: u32, height: u32) -> Vec<u8> {
     let mut renderer = renderer();
     let mut view = app.view();
     let mut tree = Tree::new(&view);
     let size = Size::new(width as f32, height as f32);
-    let node = view.as_widget_mut().layout(
-        &mut tree,
-        &renderer,
-        &layout::Limits::new(size, size),
-    );
+    let node = view
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &layout::Limits::new(size, size));
     let theme = iced_t3::theme();
     let mut messages = Vec::new();
     view.as_widget_mut().update(
         &mut tree,
-        &iced::Event::Window(iced::window::Event::RedrawRequested(
-            Instant::now(),
-        )),
+        &iced::Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
         Layout::new(&node),
         mouse::Cursor::Unavailable,
         &renderer,
@@ -76,12 +73,9 @@ fn screenshot(app: &X4App, width: u32, height: u32) -> Vec<u8> {
         mouse::Cursor::Unavailable,
         &Rectangle::with_size(size),
     );
-    renderer.screenshot(
-        Size::new(width, height),
-        1.0,
-        theme.palette().background,
-    )
+    renderer.screenshot(Size::new(width, height), 1.0, theme.palette().background)
 }
+
 fn activity(control: Control, progress: &str) -> Activity {
     Activity {
         control,
@@ -89,14 +83,14 @@ fn activity(control: Control, progress: &str) -> Activity {
         done: String::new(),
     }
 }
+
 /// Put `app` into the state the capture `name` shows.
-fn set_scene(app: &mut X4App, name: &str) {
+fn set_scene(app: &mut App, name: &str) {
     app.control_drafts.clear();
     app.mixer_drafts.clear();
     app.offline = matches!(name, "equalizer" | "mixer" | "device");
     app.dirty = name == "pending";
-    app.notice = (name == "pending")
-        .then(|| "The output, sound mode or profile changed.".into());
+    app.notice = (name == "pending").then(|| "The output, sound mode or profile changed.".into());
     app.error = None;
     app.pending = match name {
         "loading" => Some(activity(Control::Profile(1), "Loading Movie…")),
@@ -133,10 +127,11 @@ fn set_scene(app: &mut X4App, name: &str) {
     }
     app.rebuild_preview();
 }
+
 #[test]
 fn offline_render_and_state_flows() {
     load_fonts();
-    let mut app = X4App::demo();
+    let mut app = App::demo();
     assert!(app.offline);
     let confirmed = app.state.as_ref().unwrap().eq.clone();
     let _ = app.update(Message::Band(2, 3.0));
@@ -180,6 +175,7 @@ fn offline_render_and_state_flows() {
         }
     }
 }
+
 /// Heights of the step buttons `NumberInput` lays out even with
 /// `ignore_buttons`, which skips drawing them.
 const HIDDEN_STEPPERS: [f32; 3] = [8.9375, 9.75, 20.5];
@@ -194,13 +190,14 @@ fn off_grid(layout: Layout<'_>, found: &mut Vec<Rectangle>) {
         off_grid(child, found);
     }
 }
+
 /// Iced truncates fractional positions, so one off-grid box puts everything
 /// inside it out of line.
 #[test]
 fn every_box_sits_on_the_pixel_grid_vertically() {
     load_fonts();
     let renderer = renderer();
-    let mut app = X4App::demo();
+    let mut app = App::demo();
     let fixture = app.state.clone();
     for page in [Page::Equalizer, Page::Mixer, Page::Device] {
         for connected in [true, false] {
@@ -218,25 +215,21 @@ fn every_box_sits_on_the_pixel_grid_vertically() {
                 );
                 let mut found = Vec::new();
                 off_grid(Layout::new(&node), &mut found);
-                assert!(
-                    found.is_empty(),
-                    "{page:?} at {width}x{height}: {found:#?}"
-                );
+                assert!(found.is_empty(), "{page:?} at {width}x{height}: {found:#?}");
             }
         }
     }
 }
+
 /// Clicks down the column of mute icons and returns the first mute sent.
-fn click_mute(app: &X4App) -> Option<(u8, bool)> {
+fn click_mute(app: &App) -> Option<(u8, bool)> {
     let renderer = renderer();
     let size = Size::new(1120.0, 780.0);
     let mut view = app.view();
     let mut tree = Tree::new(&view);
-    let node = view.as_widget_mut().layout(
-        &mut tree,
-        &renderer,
-        &layout::Limits::new(size, size),
-    );
+    let node = view
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &layout::Limits::new(size, size));
     let x = 1120.0 - t3::PAGE_GUTTER - 16.0 - 13.0;
     let mut messages = Vec::new();
     for y in (60..400).step_by(6) {
@@ -263,6 +256,7 @@ fn click_mute(app: &X4App) -> Option<(u8, bool)> {
         _ => None,
     })
 }
+
 #[test]
 fn mute_icon_toggles_the_draft_without_writing() {
     let (mut app, events, commands) = tests::app();
@@ -284,17 +278,15 @@ fn mute_icon_toggles_the_draft_without_writing() {
 #[test]
 fn sidebar_only_navigates_and_never_edits_device_settings() {
     load_fonts();
-    let mut app = X4App::demo();
+    let mut app = App::demo();
     app.offline = false;
     let renderer = renderer();
     let size = Size::new(1120.0, 780.0);
     let mut view = app.view();
     let mut tree = Tree::new(&view);
-    let node = view.as_widget_mut().layout(
-        &mut tree,
-        &renderer,
-        &layout::Limits::new(size, size),
-    );
+    let node = view
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &layout::Limits::new(size, size));
     let mut messages = Vec::new();
     for y in (48..760).step_by(6) {
         let cursor = mouse::Cursor::Available(Point::new(100.0, y as f32));
@@ -323,9 +315,8 @@ fn sidebar_only_navigates_and_never_edits_device_settings() {
             .any(|message| matches!(message, Message::Page(Page::Device)))
     );
     assert!(
-        !messages.iter().any(|message| matches!(
-            message,
-            Message::Edit(_) | Message::Apply
-        ))
+        !messages
+            .iter()
+            .any(|message| matches!(message, Message::Edit(_) | Message::Apply))
     );
 }

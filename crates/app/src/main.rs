@@ -1,5 +1,3 @@
-mod app;
-mod curve;
 use serde_json::{Map, Value, json};
 use soundblaster_x4::{Output, open};
 use std::error::Error;
@@ -24,9 +22,8 @@ struct Options {
     help: bool,
     demo: bool,
 }
-fn parse_args(
-    mut args: impl Iterator<Item = String>,
-) -> Result<Options, String> {
+
+fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut options = Options::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -53,6 +50,7 @@ fn parse_args(
     }
     Ok(options)
 }
+
 /// Read the device and print the answer to `query` as JSON.
 fn print_query(query: Query, port: Option<&str>) -> Result<(), Box<dyn Error>> {
     let mut device = open(port)?;
@@ -67,9 +65,7 @@ fn print_query(query: Query, port: Option<&str>) -> Result<(), Box<dyn Error>> {
                 let mut profiles = Vec::new();
                 for info in device.eq_profiles(output)? {
                     let eq = device.stored_eq_profile(output, info.index)?;
-                    profiles.push(
-                        json!({"index":info.index,"name":info.name,"eq":eq}),
-                    );
+                    profiles.push(json!({"index":info.index,"name":info.name,"eq":eq}));
                 }
                 outputs.insert(name.into(), Value::Array(profiles));
             }
@@ -79,36 +75,7 @@ fn print_query(query: Query, port: Option<&str>) -> Result<(), Box<dyn Error>> {
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
-fn run_gui(options: Options) -> Result<(), Box<dyn Error>> {
-    let icon = app::icon();
-    let (width, height) = icon.dimensions();
-    let icon = iced::window::icon::from_rgba(icon.into_raw(), width, height)?;
-    iced::application(
-        move || {
-            if options.demo {
-                app::X4App::demo()
-            } else {
-                app::X4App::new(options.port.clone())
-            }
-        },
-        app::X4App::update,
-        app::X4App::view,
-    )
-    .title("Linuxblaster Control — X4")
-    .theme(|_: &app::X4App| iced_t3::theme())
-    .subscription(app::X4App::subscription)
-    .settings(iced_t3::settings_for("linuxblaster-control"))
-    .font(iced_aw::ICED_AW_FONT_BYTES)
-    .window(iced::window::Settings {
-        size: iced::Size::new(1120.0, 780.0),
-        min_size: Some(iced::Size::new(820.0, 560.0)),
-        icon: Some(icon),
-        // Matches the desktop entry, so the taskbar shows the app's icon.
-        ..iced_t3::chrome::window_settings_for("linuxblaster-control")
-    })
-    .run()?;
-    Ok(())
-}
+
 fn run() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -118,24 +85,30 @@ fn run() -> Result<(), Box<dyn Error>> {
         println!("{USAGE}");
         return Ok(());
     }
-    match options.query {
-        Some(query) => print_query(query, options.port.as_deref()),
-        None => run_gui(options),
+    if let Some(query) = options.query {
+        return print_query(query, options.port.as_deref());
     }
+    if options.demo {
+        linuxblaster_control::run_demo()?;
+    } else {
+        linuxblaster_control::run(options.port)?;
+    }
+    Ok(())
 }
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("{error}");
         std::process::exit(1);
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn cli_rejects_conflicts_and_missing_port() {
-        let parse =
-            |args: &[&str]| parse_args(args.iter().map(ToString::to_string));
+        let parse = |args: &[&str]| parse_args(args.iter().map(ToString::to_string));
         assert!(parse(&["--demo", "--status"]).is_err());
         assert!(parse(&["--demo", "--port", "/dev/ttyACM0"]).is_err());
         assert!(parse(&["--demo"]).unwrap().demo);

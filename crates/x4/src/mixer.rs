@@ -31,6 +31,7 @@ pub struct MixerRange {
     pub max_raw: i16,
     pub step_raw: u16,
 }
+
 impl MixerRange {
     /// Encode the requested level at wire precision. The advertised step is
     /// not a min + N*step grid: live X4 writes quantize internally instead.
@@ -74,15 +75,18 @@ pub struct MixerControl {
     /// means enabled); this field is already the enabled state.
     pub microphone_boost: Option<bool>,
 }
+
 impl MixerControl {
     /// Low six descriptor bits: the control type used for identity.
     pub fn kind(&self) -> u16 {
         self.descriptor & DESCRIPTOR_KIND
     }
+
     /// Whether this is the type-63 Microphone Boost flag control.
     pub fn is_microphone_boost(&self) -> bool {
         self.kind() == KIND_MICROPHONE_BOOST
     }
+
     /// Whether this control has a mute that works: tested firmware ACKs
     /// playback S/PDIF mute without changing its state.
     pub fn mute_available(&self) -> bool {
@@ -119,6 +123,7 @@ fn identity(kind: u16) -> (String, MixerGroup) {
     };
     (name.into(), group)
 }
+
 /// Physical channels plus master for a volume control index.
 fn channel_count(index: u8) -> Result<u8> {
     match index {
@@ -127,6 +132,7 @@ fn channel_count(index: u8) -> Result<u8> {
         _ => Err(invalid("Invalid volume index")),
     }
 }
+
 fn parse_channels(index: u8, n: usize, p: &[u8]) -> Result<Vec<i16>> {
     if p.len() != 1 + 3 * n || p[0] != index {
         return Err(invalid("Malformed all-channel reply"));
@@ -149,11 +155,7 @@ impl<T: Read + Write> X4<T> {
     /// GET `21 [00]`; return `(index, descriptor)` for every control.
     pub fn mixer_descriptors(&mut self) -> Result<Vec<(u8, u16)>> {
         let p = self.session.get(0x21, &[0], |_| true)?;
-        if p.len() < 4
-            || p[0] != p[1]
-            || p[2] != 0
-            || p[3] != 0
-            || p.len() < 4 + p[1] as usize * 2
+        if p.len() < 4 || p[0] != p[1] || p[2] != 0 || p[3] != 0 || p.len() < 4 + p[1] as usize * 2
         {
             return Err(invalid(
                 "Unsupported fragmented or malformed mixer capabilities",
@@ -168,15 +170,15 @@ impl<T: Read + Write> X4<T> {
             .map(|(index, bytes)| (index as u8, u16::from_le_bytes(*bytes)))
             .collect())
     }
+
     fn mixer_descriptor(&mut self, index: u8) -> Result<u16> {
         self.mixer_descriptors()?
             .into_iter()
             .find(|(i, _)| *i == index)
             .map(|(_, descriptor)| descriptor)
-            .ok_or_else(|| {
-                invalid("Mixer control not advertised by this device")
-            })
+            .ok_or_else(|| invalid("Mixer control not advertised by this device"))
     }
+
     /// GET `22 [01 index 00...]`; advertised Q8.8 range and step.
     pub fn mixer_range(&mut self, index: u8) -> Result<MixerRange> {
         let mut request = [0; 33];
@@ -203,12 +205,9 @@ impl<T: Read + Write> X4<T> {
             step_raw,
         })
     }
+
     /// Explicit channel read. Channels 0..8 for indices 0/1, 0..2 for 2..9.
-    pub fn mixer_channel_level(
-        &mut self,
-        index: u8,
-        channel: u8,
-    ) -> Result<i16> {
+    pub fn mixer_channel_level(&mut self, index: u8, channel: u8) -> Result<i16> {
         if channel >= channel_count(index)? {
             return Err(invalid("Invalid mixer channel"));
         }
@@ -220,6 +219,7 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(i16::from_le_bytes([p[1], p[2]]))
     }
+
     /// FF is read-only. Returns master first, then physical channels; rejects holes/duplicates.
     pub fn mixer_channels(&mut self, index: u8) -> Result<Vec<i16>> {
         let n = channel_count(index)? as usize;
@@ -228,6 +228,7 @@ impl<T: Read + Write> X4<T> {
         })?;
         parse_channels(index, n, &p)
     }
+
     /// SET `23 [00 index raw:i16le channel]` and verify quantized readback.
     /// A mismatch invalidates the session.
     fn write_mixer_channel(
@@ -241,23 +242,17 @@ impl<T: Read + Write> X4<T> {
         p.extend(raw.to_le_bytes());
         p.push(channel);
         self.session.set(0x23, &p)?;
-        if !range
-            .accepts_readback(raw, self.mixer_channel_level(index, channel)?)
-        {
-            return Err(self.session.mismatch(
-                "Mixer level readback mismatch; reconnect and read actual state",
-            ));
+        if !range.accepts_readback(raw, self.mixer_channel_level(index, channel)?) {
+            return Err(self
+                .session
+                .mismatch("Mixer level readback mismatch; reconnect and read actual state"));
         }
         Ok(())
     }
+
     /// Exact Q8.8 request, checked against advertised range; readback can quantize.
     /// A master write shifts lookup steps with clipping, not fixed dB offsets.
-    pub fn set_mixer_channel_raw(
-        &mut self,
-        index: u8,
-        channel: u8,
-        raw: i16,
-    ) -> Result<()> {
+    pub fn set_mixer_channel_raw(&mut self, index: u8, channel: u8, raw: i16) -> Result<()> {
         if channel >= channel_count(index)? {
             return Err(invalid("Invalid mixer channel"));
         }
@@ -267,21 +262,21 @@ impl<T: Read + Write> X4<T> {
         }
         self.write_mixer_channel(index, channel, raw, &range)
     }
+
     /// Read every channel of all volume controls (42 levels on the X4).
     pub fn capture_mixer_channels(&mut self) -> Result<Vec<Vec<i16>>> {
         (0..VOLUME_CONTROLS)
             .map(|i| self.mixer_channels(i))
             .collect()
     }
+
     /// Restores all masters before physical channels to avoid clobbering balance.
-    pub fn restore_mixer_channels(
-        &mut self,
-        levels: &[Vec<i16>],
-    ) -> Result<()> {
+    pub fn restore_mixer_channels(&mut self, levels: &[Vec<i16>]) -> Result<()> {
         if levels.len() != VOLUME_CONTROLS as usize
-            || levels.iter().zip(0..).any(|(v, i)| {
-                channel_count(i).is_ok_and(|n| v.len() != n as usize)
-            })
+            || levels
+                .iter()
+                .zip(0..)
+                .any(|(v, i)| channel_count(i).is_ok_and(|n| v.len() != n as usize))
         {
             return Err(invalid("Expected all 42 mixer levels"));
         }
@@ -304,33 +299,34 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(())
     }
+
     /// Index of the advertised type-63 flag control.
     fn microphone_boost_index(&mut self) -> Result<u8> {
         self.mixer_descriptors()?
             .into_iter()
-            .find(|(_, d)| {
-                d & DESCRIPTOR_KIND == KIND_MICROPHONE_BOOST
-                    && d & DESCRIPTOR_FLAG != 0
-            })
+            .find(|(_, d)| d & DESCRIPTOR_KIND == KIND_MICROPHONE_BOOST && d & DESCRIPTOR_FLAG != 0)
             .map(|(index, _)| index)
             .ok_or_else(|| invalid("Microphone Boost is not advertised"))
     }
+
     /// GET `24 [01 index]` for the type-63 control; raw `0` means enabled.
     pub fn microphone_boost(&mut self) -> Result<bool> {
         let index = self.microphone_boost_index()?;
         Ok(!self.mixer_flag(index)?)
     }
+
     /// SET `24 [00 index !enabled]` on the type-63 control and verify readback.
     pub fn set_microphone_boost(&mut self, enabled: bool) -> Result<()> {
         let index = self.microphone_boost_index()?;
         self.session.set(0x24, &[0, index, u8::from(!enabled)])?;
         if self.mixer_flag(index)? == enabled {
-            return Err(self.session.mismatch(
-                "Microphone Boost readback mismatch; reconnect and read actual state",
-            ));
+            return Err(self
+                .session
+                .mismatch("Microphone Boost readback mismatch; reconnect and read actual state"));
         }
         Ok(())
     }
+
     /// GET `24 [01 index]`; reply `index flag`.
     fn mixer_flag(&mut self, index: u8) -> Result<bool> {
         let p = self
@@ -341,6 +337,7 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(p[1] == 1)
     }
+
     /// Read descriptors, ranges, explicit master levels and mute flags.
     /// Use `capture_mixer_channels` for all 42 channel values.
     pub fn mixer(&mut self) -> Result<Vec<MixerControl>> {
@@ -379,6 +376,7 @@ impl<T: Read + Write> X4<T> {
         }
         Ok(controls)
     }
+
     /// Write explicit master channel zero and verify quantized readback.
     pub fn set_mixer_level(&mut self, index: u8, level_db: f32) -> Result<()> {
         // Reject nonfinite values even before issuing a capability query.
@@ -386,8 +384,7 @@ impl<T: Read + Write> X4<T> {
             return Err(invalid("Mixer level must be finite"));
         }
         let descriptor = self.mixer_descriptor(index)?;
-        if descriptor & (DESCRIPTOR_VOLUME | DESCRIPTOR_DB)
-            != DESCRIPTOR_VOLUME | DESCRIPTOR_DB
+        if descriptor & (DESCRIPTOR_VOLUME | DESCRIPTOR_DB) != DESCRIPTOR_VOLUME | DESCRIPTOR_DB
             || identity(descriptor & DESCRIPTOR_KIND).1 == MixerGroup::Other
         {
             return Err(invalid(
@@ -398,6 +395,7 @@ impl<T: Read + Write> X4<T> {
         let target = range.encode(level_db)?;
         self.write_mixer_channel(index, 0, target, &range)
     }
+
     /// SET `24 [00 index muted]` and check `index flag` readback; reject type 63.
     /// Live playback mutes are coupled: indices 0/1 change together, while the
     /// S/PDIF index-2 setter changes them but its own getter remains false.
@@ -416,9 +414,9 @@ impl<T: Read + Write> X4<T> {
         }
         self.session.set(0x24, &[0, index, u8::from(muted)])?;
         if self.mixer_flag(index)? != muted {
-            return Err(self.session.mismatch(
-                "Mixer mute readback mismatch; reconnect and read actual state",
-            ));
+            return Err(self
+                .session
+                .mismatch("Mixer mute readback mismatch; reconnect and read actual state"));
         }
         Ok(())
     }
@@ -429,8 +427,7 @@ mod tests {
     use super::*;
     use crate::testing::{Fake, ack, device, wire};
     fn fake(descriptors: &[u16]) -> Fake {
-        let mut caps =
-            vec![descriptors.len() as u8, descriptors.len() as u8, 0, 0];
+        let mut caps = vec![descriptors.len() as u8, descriptors.len() as u8, 0, 0];
         for d in descriptors {
             caps.extend(d.to_le_bytes());
         }
@@ -440,6 +437,7 @@ mod tests {
             ..Default::default()
         }
     }
+
     fn range_reply(fake: &mut Fake, index: u8, min: i16, max: i16, step: u16) {
         let mut query = [0; 33];
         query[0] = 1;
@@ -450,6 +448,7 @@ mod tests {
         p.extend(step.to_le_bytes());
         fake.responses.insert(wire(0x22, &query), wire(0x22, &p));
     }
+
     #[test]
     fn captured_mixer_values_and_boost_are_distinct() {
         let mut fake = fake(&[0x89c1, 0x00bf]);
@@ -470,6 +469,7 @@ mod tests {
         assert_eq!(controls[1].name, "Microphone Boost");
         assert_eq!(controls[1].microphone_boost, Some(false));
     }
+
     #[test]
     fn wire_encoding_checks_range_and_preserves_precision() {
         let range = MixerRange {
@@ -485,6 +485,7 @@ mod tests {
         assert!(range.encode(f32::NAN).is_err());
         assert!(range.encode(10.0).is_err());
     }
+
     #[test]
     fn level_write_requires_ack_and_independent_readback() {
         for (status, actual, succeeds) in [
@@ -518,6 +519,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn mute_write_rejects_boost_and_checks_readback() {
         let fake = fake(&[0x00bf]);
@@ -529,12 +531,10 @@ mod tests {
             fake.responses.insert(wire(0x24, &[0, 0, 1]), ack(0x24, 0));
             fake.responses
                 .insert(wire(0x24, &[1, 0]), wire(0x24, &[0, actual]));
-            assert_eq!(
-                device(fake).set_mixer_mute(0, true).is_ok(),
-                actual == 1
-            );
+            assert_eq!(device(fake).set_mixer_mute(0, true).is_ok(), actual == 1);
         }
     }
+
     #[test]
     fn microphone_boost_inverts_flag_and_requires_readback() {
         // Live X4 layout: ten volume controls, then type 63 at index 10.
@@ -543,10 +543,8 @@ mod tests {
         for enabled in [false, true] {
             for actual in [0, 1] {
                 let mut fake = fake(&descriptors);
-                fake.responses.insert(
-                    wire(0x24, &[0, 10, u8::from(!enabled)]),
-                    ack(0x24, 0),
-                );
+                fake.responses
+                    .insert(wire(0x24, &[0, 10, u8::from(!enabled)]), ack(0x24, 0));
                 fake.responses
                     .insert(wire(0x24, &[1, 10]), wire(0x24, &[10, actual]));
                 let mut dev = device(fake);
@@ -556,6 +554,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn microphone_boost_requires_advertised_type_63() {
         let fake = fake(&[0x29cf; 11]);
@@ -563,6 +562,7 @@ mod tests {
         assert!(device(fake).set_microphone_boost(true).is_err());
         assert!(writes.lock().unwrap().iter().all(|w| w[1] != 0x24));
     }
+
     #[test]
     fn invalid_level_sends_nothing() {
         let fake = Fake::default();
@@ -570,6 +570,7 @@ mod tests {
         assert!(device(fake).set_mixer_level(0, f32::INFINITY).is_err());
         assert!(writes.lock().unwrap().is_empty());
     }
+
     #[test]
     fn live_loopback_quantization_exceeds_reported_step() {
         let range = MixerRange {

@@ -1,7 +1,6 @@
 use super::*;
 use soundblaster_x4::{
-    EqProfileInfo, Feature, MixerControl, MixerGroup, MixerRange, Output,
-    SxfiMode,
+    EqProfileInfo, Feature, MixerControl, MixerGroup, MixerRange, Output, SxfiMode,
 };
 use std::time::Instant;
 
@@ -46,11 +45,13 @@ pub fn state() -> State {
         }],
     }
 }
-pub fn app() -> (X4App, Sender<Event>, Receiver<Command>) {
+
+pub fn app() -> (App, Sender<Event>, Receiver<Command>) {
     let (tx, commands) = mpsc::channel();
     let (events, rx) = mpsc::channel();
-    (X4App::with_channels(tx, rx), events, commands)
+    (App::with_channels(tx, rx), events, commands)
 }
+
 #[test]
 fn mixer_refresh_preserves_eq_edits_but_context_change_discards_them() {
     let (mut app, events, _) = app();
@@ -76,6 +77,7 @@ fn mixer_refresh_preserves_eq_edits_but_context_change_discards_them() {
     assert_eq!(app.draft.as_ref().unwrap().preamp_db, -9.0);
     assert!(app.notice.is_some());
 }
+
 #[test]
 fn stale_context_rejected_for_mode_profile_output_and_direct_changes() {
     let original = state();
@@ -94,6 +96,7 @@ fn stale_context_rejected_for_mode_profile_output_and_direct_changes() {
     changed.features |= 1 << Feature::DirectMode.bit();
     assert!(context.check(&changed).is_err());
 }
+
 #[test]
 fn poll_preserves_mixer_drafts_until_apply_or_revert() {
     let (mut app, events, commands) = app();
@@ -133,6 +136,7 @@ fn profile_availability_follows_sxfi_and_direct_mode() {
     assert!(!current.eq_profile_available(0));
     assert!(!current.eq_profile_available(3));
 }
+
 #[test]
 fn spdif_playback_mute_is_disabled_without_disabling_other_mutes() {
     let mut control = state().mixer.remove(0);
@@ -150,10 +154,11 @@ fn spdif_playback_mute_is_disabled_without_disabling_other_mutes() {
     control.muted = None;
     assert!(!control.mute_available());
 }
+
 #[test]
 fn boost_and_eq_wait_for_apply_and_confirmed_readback() {
     let (mut app, events, commands) = app();
-    let mut current = X4App::demo().state.unwrap();
+    let mut current = App::demo().state.unwrap();
     let boost = current.mixer.iter_mut().find(|c| c.index == 10).unwrap();
     assert!(boost.is_microphone_boost());
     boost.microphone_boost = Some(false);
@@ -202,6 +207,7 @@ fn boost_and_eq_wait_for_apply_and_confirmed_readback() {
     assert!(!app.dirty);
     assert_eq!(app.draft.as_ref().unwrap().bands_db[0], 3.0);
 }
+
 #[test]
 fn progress_stays_on_its_control_until_the_write_is_confirmed() {
     let (mut app, events, _commands) = app();
@@ -234,6 +240,7 @@ fn progress_stays_on_its_control_until_the_write_is_confirmed() {
     assert_eq!(confirmed.control, control);
     assert_eq!(confirmed.message, "Now on Speakers");
 }
+
 #[test]
 fn confirmation_expires_and_a_failure_never_confirms() {
     let (mut app, events, _commands) = app();
@@ -251,6 +258,7 @@ fn confirmation_expires_and_a_failure_never_confirms() {
     assert!(!app.busy());
     assert!(app.confirmed.is_none());
 }
+
 #[test]
 fn controls_ignore_input_during_a_write_without_looking_disabled() {
     let (mut app, _events, _commands) = app();
@@ -265,6 +273,7 @@ fn controls_ignore_input_during_a_write_without_looking_disabled() {
         Some(Message::Ignored)
     ));
 }
+
 #[test]
 fn only_one_command_is_queued_while_busy() {
     let (mut app, _, commands) = app();
@@ -273,6 +282,7 @@ fn only_one_command_is_queued_while_busy() {
     assert!(matches!(commands.try_recv().unwrap(), Command::Refresh));
     assert!(commands.try_recv().is_err());
 }
+
 #[test]
 fn failed_operation_discards_unconfirmed_state() {
     let (mut app, events, _) = app();
@@ -398,8 +408,7 @@ fn staged_mode_and_profile_are_validated_in_dependency_order() {
         .unwrap();
     app.events();
     let context = EqContext::from_state(&current);
-    let _ =
-        app.update(Message::Edit(Command::Feature(Feature::DirectMode, false)));
+    let _ = app.update(Message::Edit(Command::Feature(Feature::DirectMode, false)));
     let _ = app.update(Message::Edit(Command::Sxfi(context, SxfiMode::On)));
     let _ = app.update(Message::Edit(Command::Profile(context, 3)));
     let _ = app.update(Message::Apply);

@@ -1,5 +1,8 @@
 //! Pending controls and a projected view; only Apply sends a write to the worker.
-use super::{Command, EqContext, X4App};
+use crate::{
+    app::App,
+    worker::{Command, EqContext},
+};
 use soundblaster_x4::{Feature, Output, State};
 
 impl Command {
@@ -14,7 +17,8 @@ impl Command {
             _ => false,
         }
     }
-    pub(super) fn changes_context(&self) -> bool {
+
+    pub(crate) fn changes_context(&self) -> bool {
         matches!(
             self,
             Self::Output(_)
@@ -23,6 +27,7 @@ impl Command {
                 | Self::Feature(Feature::DirectMode, _)
         )
     }
+
     fn changed(&self, state: &State) -> bool {
         match self {
             Self::Output(value) => state.output != *value,
@@ -38,12 +43,11 @@ impl Command {
                 .mixer
                 .iter()
                 .find(|control| control.is_microphone_boost())
-                .is_some_and(|control| {
-                    control.microphone_boost != Some(*value)
-                }),
+                .is_some_and(|control| control.microphone_boost != Some(*value)),
             _ => false,
         }
     }
+
     fn rank(&self) -> u8 {
         match self {
             Self::Output(_) => 0,
@@ -55,7 +59,8 @@ impl Command {
             _ => 6,
         }
     }
-    pub(super) fn rebased(&self, state: &State) -> Self {
+
+    pub(crate) fn rebased(&self, state: &State) -> Self {
         let context = EqContext::from_state(state);
         match self {
             Self::Sxfi(_, mode) => Self::Sxfi(context, *mode),
@@ -65,7 +70,7 @@ impl Command {
     }
 }
 
-pub(super) fn project(state: &mut State, change: &Command) {
+pub(crate) fn project(state: &mut State, change: &Command) {
     match change {
         Command::Output(value) => state.output = *value,
         Command::Feature(feature, value) => {
@@ -106,10 +111,7 @@ pub(super) fn project(state: &mut State, change: &Command) {
 }
 
 /// Check the entire plan before the worker performs its first write.
-pub(super) fn validate_changes(
-    state: &State,
-    changes: &[Command],
-) -> Result<(), String> {
+pub(crate) fn validate_changes(state: &State, changes: &[Command]) -> Result<(), String> {
     let mut projected = state.clone();
     for change in changes {
         let valid = match change {
@@ -146,32 +148,32 @@ pub(super) fn validate_changes(
                             })
                     })
             }
-            Command::MixerMute(index, _) => {
-                projected.mixer.iter().any(|control| {
-                    control.index == *index && control.mute_available()
-                })
-            }
-            Command::MicrophoneBoost(_) => {
-                projected.mixer.iter().any(|control| {
-                    control.is_microphone_boost()
-                        && control.microphone_boost.is_some()
-                })
-            }
+            Command::MixerMute(index, _) => projected
+                .mixer
+                .iter()
+                .any(|control| control.index == *index && control.mute_available()),
+            Command::MicrophoneBoost(_) => projected
+                .mixer
+                .iter()
+                .any(|control| control.is_microphone_boost() && control.microphone_boost.is_some()),
             Command::Refresh | Command::Apply(..) => false,
         };
         if !valid {
-            return Err("A pending setting is unavailable. Revert or refresh before applying.".into());
+            return Err(
+                "A pending setting is unavailable. Revert or refresh before applying.".into(),
+            );
         }
         project(&mut projected, change);
     }
     Ok(())
 }
 
-impl X4App {
-    pub(super) fn context_pending(&self) -> bool {
+impl App {
+    pub(crate) fn context_pending(&self) -> bool {
         self.control_drafts.iter().any(Command::changes_context)
     }
-    pub(super) fn rebuild_preview(&mut self) {
+
+    pub(crate) fn rebuild_preview(&mut self) {
         self.preview.clone_from(&self.state);
         if let Some(preview) = &mut self.preview {
             let mut changes = self.control_drafts.clone();
@@ -181,7 +183,8 @@ impl X4App {
             }
         }
     }
-    pub(super) fn stage(&mut self, change: Command) {
+
+    pub(crate) fn stage(&mut self, change: Command) {
         if self.busy() || self.offline {
             return;
         }
@@ -214,11 +217,9 @@ impl X4App {
                             | Command::Feature(Feature::HeadphoneHighGain, _)
                     )
                 }),
-                Command::Sxfi(..)
-                | Command::Feature(Feature::DirectMode, true) => {
-                    self.control_drafts.retain(|old| {
-                        !matches!(old, Command::Profile(..) | Command::Sxfi(..))
-                    });
+                Command::Sxfi(..) | Command::Feature(Feature::DirectMode, true) => {
+                    self.control_drafts
+                        .retain(|old| !matches!(old, Command::Profile(..) | Command::Sxfi(..)));
                 }
                 _ => {}
             }
@@ -229,7 +230,8 @@ impl X4App {
         }
         self.rebuild_preview();
     }
-    pub(super) fn planned_changes(&self) -> Result<Vec<Command>, String> {
+
+    pub(crate) fn planned_changes(&self) -> Result<Vec<Command>, String> {
         let state = self.state.as_ref().ok_or("Device is unavailable")?;
         let mut changes = self.control_drafts.clone();
         for control in &state.mixer {
@@ -251,7 +253,8 @@ impl X4App {
         validate_changes(state, &changes)?;
         Ok(changes)
     }
-    pub(super) fn has_changes(&self) -> bool {
+
+    pub(crate) fn has_changes(&self) -> bool {
         self.dirty
             || !self.control_drafts.is_empty()
             || self.state.as_ref().is_some_and(|state| {
@@ -259,28 +262,26 @@ impl X4App {
                     self.mixer_drafts
                         .get(&control.index)
                         .zip(control.level_db)
-                        .is_some_and(|(value, actual)| {
-                            (*value - actual).abs() > 0.001
-                        })
+                        .is_some_and(|(value, actual)| (*value - actual).abs() > 0.001)
                 })
             })
     }
-    pub(super) fn apply(&mut self) {
+
+    pub(crate) fn apply(&mut self) {
         if self.busy() || self.offline {
             return;
         }
         match self.planned_changes() {
             Ok(changes) if !changes.is_empty() => {
-                let context = EqContext::from_state(
-                    self.state.as_ref().expect("validated device"),
-                );
+                let context = EqContext::from_state(self.state.as_ref().expect("validated device"));
                 self.send(Command::Apply(context, changes));
             }
             Ok(_) => {}
             Err(error) => self.error = Some(error),
         }
     }
-    pub(super) fn revert(&mut self) {
+
+    pub(crate) fn revert(&mut self) {
         if self.busy() {
             return;
         }
