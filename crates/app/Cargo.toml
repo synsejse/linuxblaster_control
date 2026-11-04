@@ -9,7 +9,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-iced_t3 = { path = "../iced_t3" }
+iced_t3 = { git = "https://github.com/synsejse/iced_t3", rev = "c9be75b7f1c3b1f32ee9328aa90ceb2c8dc6fee5" }
 soundblaster-x4 = { path = "../x4" }
 serde_json.workspace = true
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

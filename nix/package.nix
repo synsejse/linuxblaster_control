@@ -46,6 +46,7 @@ rustPlatform.buildRustPackage rec {
 
   cargoLock = {
     lockFile = ../Cargo.lock;
+    outputHashes = import ../packaging/cargo-git-hashes.nix;
   };
 
   nativeBuildInputs = [
@@ -72,8 +73,8 @@ rustPlatform.buildRustPackage rec {
     install -Dm644 ${../crates/x4/README.md} $out/share/doc/${pname}/api/README.md
     install -Dm644 ${../crates/x4/docs/PROTOCOL.md} $out/share/doc/${pname}/api/PROTOCOL.md
     install -Dm644 ${../LICENSE} $out/share/licenses/${pname}/LICENSE
-    install -Dm644 ${../crates/iced_t3/assets/fonts/inter/LICENSE.txt} $out/share/licenses/${pname}/inter/LICENSE.txt
-    install -Dm644 ${../crates/iced_t3/assets/fonts/lucide/LICENSE} $out/share/licenses/${pname}/lucide/LICENSE
+    install -Dm644 ${../packaging/licenses/inter/LICENSE.txt} $out/share/licenses/${pname}/inter/LICENSE.txt
+    install -Dm644 ${../packaging/licenses/lucide/LICENSE} $out/share/licenses/${pname}/lucide/LICENSE
   '';
 
   postFixup = ''

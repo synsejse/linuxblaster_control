@@ -1,3 +1,0 @@
-[submodule "crates/iced_t3"]
-	path = crates/iced_t3
-	url = https://github.com/synsejse/iced_t3.git

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/app", "crates/iced_t3", "crates/x4"]
+members = ["crates/app", "crates/x4"]
 default-members = ["crates/app"]
 resolver = "3"
 

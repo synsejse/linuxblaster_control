@@ -38,7 +38,7 @@ not supported.
 
 ```nix
 # flake inputs
-inputs.linuxblaster_control.url = "git+https://github.com/synsejse/linuxblaster_control?ref=x4-support&submodules=1";
+inputs.linuxblaster_control.url = "github:synsejse/linuxblaster_control";
 
 # NixOS modules
 linuxblaster_control.nixosModules.default
@@ -48,6 +48,19 @@ linuxblaster_control.nixosModules.default
 The module installs the app (also available as `linuxblaster`) and a udev rule.
 The rule gives the active desktop session access to the X4 and tells
 ModemManager to ignore it.
+
+The repository has no submodules, so a plain `github:` input is enough. Nix
+packages that build from its `Cargo.lock` outside this flake must declare the
+`iced_t3` git dependency:
+
+```nix
+cargoLock = {
+  lockFile = "${src}/Cargo.lock";
+  outputHashes = import "${src}/packaging/cargo-git-hashes.nix";
+};
+```
+
+The font licenses to install are in `packaging/licenses/`.
 
 ## Run
 
@@ -65,7 +78,7 @@ a query. `--port` is needed only when several X4s are connected.
 ## Development
 
 ```sh
-git clone --recurse-submodules -b x4-support https://github.com/synsejse/linuxblaster_control
+git clone https://github.com/synsejse/linuxblaster_control
 nix-shell                     # or: nix develop
 cargo run --locked -- --demo
 cargo test --locked --workspace --all-targets
@@ -76,15 +89,26 @@ nix build                     # package
 Without Nix, you need a Rust toolchain, `pkg-config`, libudev headers and the
 usual Wayland/X11 graphics libraries.
 
-The workspace has three crates:
+The workspace has two crates:
 
 - [`crates/app`](crates/app/README.md): `linuxblaster_control`, the Iced GUI and CLI.
-- [`crates/iced_t3`](https://github.com/synsejse/iced_t3): `iced_t3`, a reusable
-  library with T3 Code's design and client-side window decorations for any Iced
-  app. It lives in its own repository and is included as a git submodule.
 - [`crates/x4`](crates/x4/README.md): `soundblaster-x4`, a standalone Rust API for
   the X4 control protocol. Its [protocol reference](crates/x4/docs/PROTOCOL.md)
   documents the wire format and device quirks.
+
+[`iced_t3`](https://github.com/synsejse/iced_t3), a reusable library with T3
+Code's design and client-side window decorations for any Iced app, is a Cargo git
+dependency pinned to a full commit in `crates/app/Cargo.toml`. Workspace commands
+do not check it, so run its own tests in its repository.
+
+To move the pin, change `rev`, run `cargo update -p iced_t3`, and set the new
+source hash in `packaging/cargo-git-hashes.nix`:
+
+```sh
+nix flake prefetch --json github:synsejse/iced_t3/<rev>
+```
+
+Also refresh `packaging/licenses/` if the bundled fonts' licenses changed.
 
 Tests never touch hardware. `crates/x4/examples/hardware_check.rs` is an opt-in
 live test that backs up the device settings and restores them afterwards.

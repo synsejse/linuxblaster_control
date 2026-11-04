@@ -1233,10 +1233,9 @@ dependencies = [
 [[package]]
 name = "iced_t3"
 version = "0.1.0"
+source = "git+https://github.com/synsejse/iced_t3?rev=c9be75b7f1c3b1f32ee9328aa90ceb2c8dc6fee5#c9be75b7f1c3b1f32ee9328aa90ceb2c8dc6fee5"
 dependencies = [
  "iced",
- "image",
- "pollster",
 ]
 
 [[package]]

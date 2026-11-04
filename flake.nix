@@ -2,8 +2,6 @@
   description = "Linuxblaster Control - A native GUI application to control the Creative Sound Blaster X4";
 
   inputs = {
-    # crates/iced_t3 is a submodule, so the source must include it.
-    self.submodules = true;
     nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1"; # unstable Nixpkgs
     fenix = {
       url = "https://flakehub.com/f/nix-community/fenix/0.1";
