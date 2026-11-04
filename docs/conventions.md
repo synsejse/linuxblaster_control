@@ -25,11 +25,13 @@ file and `rustfmt.toml` identical in both repositories.
 - Split by responsibility, not a fixed line count. Comparable responsibilities
   should have matching names and layouts across the apps; differences in
   hardware and process ownership must remain explicit.
-- Declare shared dependencies in `[workspace.dependencies]`. Pin Git libraries
+- Use a root package with `src/` for a single-crate app. Use a workspace when
+  multiple crates need separate boundaries; declare shared dependencies in
+  `[workspace.dependencies]` only then. Pin Git libraries
   by full `rev` and exact package version, commit `Cargo.lock`, and maintain
   `packaging/cargo-git-hashes.nix` alongside revision changes. Keep reusable
   library tests in their own repositories.
 
-Run `cargo fmt --all -- --check`, workspace Clippy with warnings denied, and
-workspace tests before committing. Run private-bus and offline UI tests when
-changing their respective paths. Never use hardware setters as smoke tests.
+Run `cargo fmt --all --check`, Clippy with warnings denied, and tests for all
+targets before committing. For multi-crate repositories, use `--workspace`.
+Run private-bus and offline UI tests when changing their respective paths. Never use hardware setters as smoke tests.

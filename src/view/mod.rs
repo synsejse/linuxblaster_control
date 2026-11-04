@@ -17,7 +17,7 @@ use iced_t3::{Tone, chrome, color, icon, widget as t3};
 
 /// Display size of the sidebar icon.
 pub const ICON_SIZE: u32 = 22;
-pub const ICON_PNG: &[u8] = include_bytes!("../../../../packaging/linuxblaster-control.png");
+pub const ICON_PNG: &[u8] = include_bytes!("../../packaging/linuxblaster-control.png");
 
 pub fn icon() -> image::RgbaImage {
     image::load_from_memory(ICON_PNG)

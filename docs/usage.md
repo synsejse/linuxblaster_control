@@ -10,7 +10,7 @@ in view while the page scrolls. The backend library remains independent of the G
 configuration structs and tile-size enum; application and window setup share the
 `linuxblaster-control` desktop ID through its setup helpers.
 
-From `code/` on NixOS:
+From the repository root on NixOS:
 
 ```sh
 nix-shell --run 'cargo run --locked'
@@ -55,8 +55,8 @@ The main pane scrolls at smaller sizes; all ten EQ bands fit side by side.
 Offline validation and optional native software-rendered captures:
 
 ```sh
-nix-shell --run 'cargo test -p linuxblaster_control'
-nix-shell --run 'X4_UI_CAPTURE_DIR=/tmp/x4-ui cargo test -p linuxblaster_control offline_render_and_state_flows'
+nix-shell --run 'cargo test --locked'
+nix-shell --run 'X4_UI_CAPTURE_DIR=/tmp/x4-ui cargo test --locked offline_render_and_state_flows'
 ```
 
 The rendering harness draws the actual Iced widget tree using tiny-skia at

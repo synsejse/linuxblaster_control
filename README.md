@@ -4,7 +4,7 @@ A native Linux controller for the **Creative Sound Blaster X4 (`041e:3278`)**.
 Forked from [RizeCrime/linuxblaster_control](https://github.com/RizeCrime/linuxblaster_control),
 which targets the G6. This branch targets the X4 only.
 
-![Linuxblaster Control equalizer page](crates/app/screenshot.png)
+![Linuxblaster Control equalizer page](docs/screenshot.png)
 
 Audio keeps working through Linux's standard `snd-usb-audio` driver. The app
 changes device settings over the X4's serial control port (`/dev/ttyACM*`). No
@@ -81,16 +81,18 @@ a query. `--port` is needed only when several X4s are connected.
 git clone https://github.com/synsejse/linuxblaster_control
 nix-shell                     # or: nix develop
 cargo run --locked -- --demo
-cargo test --locked --workspace --all-targets
-cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
 nix build                     # package
 ```
 
 Without Nix, you need a Rust toolchain, `pkg-config`, libudev headers and the
 usual Wayland/X11 graphics libraries.
 
-The workspace contains [`crates/app`](crates/app/README.md), the Iced GUI and
-CLI. Its reusable libraries live in separate repositories:
+The app is a single Rust package: `src/main.rs` handles the CLI and
+`src/lib.rs` starts the GUI, with focused modules beside it. Offline fixtures
+live in `fixtures/`; see [desktop usage and testing](docs/usage.md).
+Its reusable libraries live in separate repositories:
 
 - [`soundblaster-x4`](https://github.com/synsejse/soundblaster-x4-rs): the X4
   device API, captured-traffic tests and
@@ -99,7 +101,7 @@ CLI. Its reusable libraries live in separate repositories:
   and client-side window decorations.
 
 Both are Cargo Git dependencies pinned by full commit and exact package version
-in the workspace `Cargo.toml`. Workspace commands check the app; run each
+in `Cargo.toml`. Cargo commands check the app; run each
 library's tests in its own repository.
 
 To move a pin, change `rev`, run `cargo update -p <package>`, and set the new

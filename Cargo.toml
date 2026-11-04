@@ -1,24 +1,30 @@
-[workspace]
-members = ["crates/app"]
-default-members = ["crates/app"]
-resolver = "3"
-
-[workspace.package]
+[package]
+name = "linuxblaster_control"
+description = "Control the Creative Sound Blaster X4 on Linux: output, Direct Mode, headphone gain and hardware EQ"
+homepage = "https://github.com/synsejse/linuxblaster_control"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
 repository = "https://github.com/synsejse/linuxblaster_control"
 
-[workspace.dependencies]
-soundblaster-x4 = { git = "https://github.com/synsejse/soundblaster-x4-rs", rev = "f9a61d8f55fb16398c218ded621fd0d4127759e3", version = "=0.1.0" }
+[dependencies]
 iced_t3 = { git = "https://github.com/synsejse/iced_t3", rev = "c9be75b7f1c3b1f32ee9328aa90ceb2c8dc6fee5", version = "=0.1.0" }
+soundblaster-x4 = { git = "https://github.com/synsejse/soundblaster-x4-rs", rev = "f9a61d8f55fb16398c218ded621fd0d4127759e3", version = "=0.1.0" }
 serde_json = "1.0.148"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
-[workspace.lints.rust]
+iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "web-colors", "x11", "wayland", "tokio", "canvas", "image-without-codecs", "advanced"] }
+iced_aw = { version = "=0.14.1", default-features = false, features = ["number_input"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+pollster = "0.4"
+
+[lints.rust]
 unsafe_code = "forbid"
 
-[workspace.lints.clippy]
+[lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "warn"

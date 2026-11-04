@@ -37,7 +37,8 @@ rustPlatform.buildRustPackage rec {
     fileset = lib.fileset.unions [
       ../Cargo.toml
       ../Cargo.lock
-      ../crates
+      ../src
+      ../fixtures
       ../packaging
       ../README.md
       ../LICENSE
@@ -57,7 +58,6 @@ rustPlatform.buildRustPackage rec {
 
   # Headless UI checks need no device or display; the API has its own test suite.
   doCheck = true;
-  cargoTestFlags = [ "--workspace" ];
 
   postInstall = ''
     # Install udev rules
