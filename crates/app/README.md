@@ -6,6 +6,10 @@ widgets and client-side window decorations. Each point of the band-gain curve si
 above its vertical EQ fader, and a docked bar keeps EQ status and the Apply action
 in view while the page scrolls. The backend library remains independent of the GUI.
 
+The `iced_t3` submodule is pinned to `c9be75b`. Sidebar controls use its named
+configuration structs and tile-size enum; application and window setup share the
+`linuxblaster-control` desktop ID through its setup helpers.
+
 From `code/` on NixOS:
 
 ```sh

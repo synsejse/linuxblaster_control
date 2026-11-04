@@ -84,10 +84,15 @@ impl X4App {
         };
         let device = t3::sidebar_device(
             "device",
-            t3::icon_tile(icon::RADIO_RECEIVER, 32),
-            "Sound Blaster X4",
-            detail,
-            false,
+            t3::SidebarDevice {
+                media: t3::icon_tile(
+                    icon::RADIO_RECEIVER,
+                    t3::TileSize::Compact,
+                ),
+                title: "Sound Blaster X4".into(),
+                detail: detail.into(),
+                selected: false,
+            },
             None,
         );
         t3::sidebar(
@@ -106,11 +111,14 @@ impl X4App {
         let control = Control::Output(output);
         t3::sidebar_choice(
             output_name(output),
-            Some(glyph),
-            output_name(output),
-            self.progress(control)
-                .unwrap_or_else(|| t3::radio(selected)),
-            selected,
+            t3::SidebarChoice {
+                glyph: Some(glyph),
+                label: output_name(output).into(),
+                marker: self
+                    .progress(control)
+                    .unwrap_or_else(|| t3::radio(selected)),
+                selected,
+            },
             self.press(true, Message::Command(Command::Output(output))),
         )
     }
@@ -123,11 +131,14 @@ impl X4App {
         let available = state.eq_profile_available(profile.index);
         let choice = t3::sidebar_choice(
             format!("profile-{}", profile.index),
-            None,
-            profile.name.clone(),
-            self.progress(Control::Profile(profile.index))
-                .unwrap_or_else(|| t3::radio(selected)),
-            selected,
+            t3::SidebarChoice {
+                glyph: None,
+                label: profile.name.as_str().into(),
+                marker: self
+                    .progress(Control::Profile(profile.index))
+                    .unwrap_or_else(|| t3::radio(selected)),
+                selected,
+            },
             self.press(
                 available,
                 Message::Command(Command::Profile(

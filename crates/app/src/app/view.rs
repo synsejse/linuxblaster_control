@@ -53,7 +53,7 @@ impl X4App {
                 [],
             )),
             None => page.push(t3::empty_state(
-                t3::icon_tile(icon::UNPLUG, 36),
+                t3::icon_tile(icon::UNPLUG, t3::TileSize::Standard),
                 "Connect your Sound Blaster X4",
                 [
                     "Plug in your device and close any other controllers.",

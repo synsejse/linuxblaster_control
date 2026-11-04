@@ -97,18 +97,14 @@ fn run_gui(options: Options) -> Result<(), Box<dyn Error>> {
     .title("Linuxblaster Control — X4")
     .theme(|_: &app::X4App| iced_t3::theme())
     .subscription(app::X4App::subscription)
-    .settings(iced_t3::settings())
+    .settings(iced_t3::settings_for("linuxblaster-control"))
     .font(iced_aw::ICED_AW_FONT_BYTES)
     .window(iced::window::Settings {
         size: iced::Size::new(1120.0, 900.0),
         min_size: Some(iced::Size::new(860.0, 640.0)),
         icon: Some(icon),
         // Matches the desktop entry, so the taskbar shows the app's icon.
-        platform_specific: iced::window::settings::PlatformSpecific {
-            application_id: "linuxblaster-control".into(),
-            ..Default::default()
-        },
-        ..iced_t3::chrome::window_settings()
+        ..iced_t3::chrome::window_settings_for("linuxblaster-control")
     })
     .run()?;
     Ok(())
