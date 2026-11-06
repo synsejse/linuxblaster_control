@@ -1,6 +1,7 @@
 { lib
 , rustPlatform
 , pkg-config
+, desktop-file-utils
 , udev
 , wayland
 , libxkbcommon
@@ -52,6 +53,7 @@ rustPlatform.buildRustPackage rec {
 
   nativeBuildInputs = [
     pkg-config
+    desktop-file-utils
   ];
 
   buildInputs = runtimeLibraries;
@@ -75,6 +77,8 @@ rustPlatform.buildRustPackage rec {
     install -Dm644 ${../LICENSE} $out/share/licenses/${pname}/LICENSE
     install -Dm644 ${../packaging/licenses/inter/LICENSE.txt} $out/share/licenses/${pname}/inter/LICENSE.txt
     install -Dm644 ${../packaging/licenses/lucide/LICENSE} $out/share/licenses/${pname}/lucide/LICENSE
+
+    desktop-file-validate $out/share/applications/linuxblaster-control.desktop
   '';
 
   postFixup = ''
